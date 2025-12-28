@@ -393,6 +393,11 @@ class ESH(nn.Module):
         # Dimension d from last axis
         d = u.shape[-1]
         
+        # Handle potential infinite gradients (e.g. from exploding potentials)
+        # Replace Inf with large finite number to preserve direction for clipping
+        if not torch.isfinite(grad).all():
+            grad = torch.nan_to_num(grad, nan=0.0, posinf=1e30, neginf=-1e30)
+            
         # Gradient norm and unit vector
         g_norm = grad.norm(dim=-1, keepdim=True).clamp(min=1e-10)
         
