@@ -310,6 +310,151 @@ class TestUtilityFunctions:
         assert torch.isclose(T, torch.tensor([1.0], device=device))
 
 
+class TestVectorization:
+    """Test that all integrators are properly vectorized."""
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_overdamped_batch(self, device):
+        """OverdampedLangevin should handle batch dimensions."""
+        integrator = OverdampedLangevin(gamma=1.0, kT=1.0)
+        force_fn = lambda x: -x
+        for shape in [(10, 3), (5, 10, 3), (2, 3, 4, 2)]:
+            x = torch.randn(shape, device=device)
+            x_new = integrator.step(x, force_fn, dt=0.01)
+            assert x_new.shape == shape
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_baoab_batch(self, device):
+        """BAOAB should handle batch dimensions."""
+        integrator = BAOAB(gamma=1.0, kT=1.0, mass=1.0)
+        force_fn = lambda x: -x
+        for shape in [(10, 3), (5, 10, 3), (2, 3, 4, 2)]:
+            x = torch.randn(shape, device=device)
+            v = torch.randn(shape, device=device)
+            x_new, v_new = integrator.step(x, v, force_fn, dt=0.01)
+            assert x_new.shape == shape
+            assert v_new.shape == shape
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_verlet_batch(self, device):
+        """VelocityVerlet should handle batch dimensions."""
+        integrator = VelocityVerlet(mass=1.0)
+        force_fn = lambda x: -x
+        for shape in [(10, 3), (5, 10, 3), (2, 3, 4, 2)]:
+            x = torch.randn(shape, device=device)
+            v = torch.randn(shape, device=device)
+            x_new, v_new = integrator.step(x, v, force_fn, dt=0.01)
+            assert x_new.shape == shape
+            assert v_new.shape == shape
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_nhc_batch(self, device):
+        """NoseHooverChain should handle batch dimensions."""
+        integrator = NoseHooverChain(kT=1.0, mass=1.0, Q=1.0, n_chain=2)
+        force_fn = lambda x: -x
+        for batch_shape, dim in [((10,), 3), ((5, 10), 3), ((2, 3, 4), 2)]:
+            shape = batch_shape + (dim,)
+            x = torch.randn(shape, device=device)
+            v = torch.randn(shape, device=device)
+            xi = torch.zeros(batch_shape + (2,), device=device)
+            x_new, v_new, xi_new = integrator.step(x, v, xi, force_fn, dt=0.01, ndof=dim)
+            assert x_new.shape == shape
+            assert v_new.shape == shape
+            assert xi_new.shape == batch_shape + (2,)
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_esh_batch(self, device):
+        """ESH should handle batch dimensions."""
+        esh = ESH(eps=0.1)
+        grad_fn = lambda x: x
+        for batch_shape, dim in [((10,), 3), ((5, 10), 3), ((2, 3, 4), 2)]:
+            shape = batch_shape + (dim,)
+            x = torch.randn(shape, device=device)
+            u = torch.randn(shape, device=device)
+            u = u / u.norm(dim=-1, keepdim=True)
+            r = torch.zeros(batch_shape, device=device)
+            x_new, u_new, r_new = esh.step(x, u, r, grad_fn)
+            assert x_new.shape == shape
+            assert u_new.shape == shape
+            assert r_new.shape == batch_shape
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_gle_batch(self, device):
+        """GLE should handle batch dimensions."""
+        gle = GLE(kT=1.0, mass=1.0, gamma=[1.0, 2.0], c=[1.0, 2.0])
+        force_fn = lambda x: -x
+        for batch_shape, dim in [((10,), 3), ((5, 10), 3), ((2, 3, 4), 2)]:
+            shape = batch_shape + (dim,)
+            x = torch.randn(shape, device=device)
+            v = torch.randn(shape, device=device)
+            s = torch.randn(shape + (2,), device=device)
+            x_new, v_new, s_new = gle.step(x, v, s, force_fn, dt=0.01)
+            assert x_new.shape == shape
+            assert v_new.shape == shape
+            assert s_new.shape == shape + (2,)
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_vectorized_consistency(self, device):
+        """Batched computation should match individual computation."""
+        torch.manual_seed(42)
+        integrator = VelocityVerlet(mass=1.0)
+        force_fn = lambda x: -x
+        
+        # Single trajectory
+        x1 = torch.tensor([[1.0, 0.0]], device=device)
+        v1 = torch.tensor([[0.0, 1.0]], device=device)
+        x1_new, v1_new = integrator.step(x1, v1, force_fn, dt=0.1)
+        
+        # Batched (same initial conditions in batch)
+        x_batch = torch.tensor([[1.0, 0.0], [1.0, 0.0]], device=device)
+        v_batch = torch.tensor([[0.0, 1.0], [0.0, 1.0]], device=device)
+        x_batch_new, v_batch_new = integrator.step(x_batch, v_batch, force_fn, dt=0.1)
+        
+        assert torch.allclose(x1_new, x_batch_new[0:1])
+        assert torch.allclose(v1_new, v_batch_new[0:1])
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_vectorization_speedup(self, device):
+        """Batched should be faster than sequential (verifies broadcasting)."""
+        import time
+        
+        def sync(device):
+            if 'cuda' in str(device) and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            elif 'mps' in str(device) and torch.backends.mps.is_available():
+                torch.mps.synchronize()
+        
+        integrator = BAOAB(gamma=1.0, kT=1.0, mass=1.0)
+        force_fn = lambda x: -x
+        n_particles = 100
+        dim = 10
+        n_steps = 50
+        
+        # Sequential (loop over particles)
+        x_seq = [torch.randn(1, dim, device=device) for _ in range(n_particles)]
+        v_seq = [torch.randn(1, dim, device=device) for _ in range(n_particles)]
+        sync(device)
+        start = time.perf_counter()
+        for _ in range(n_steps):
+            for i in range(n_particles):
+                x_seq[i], v_seq[i] = integrator.step(x_seq[i], v_seq[i], force_fn, dt=0.01)
+        sync(device)
+        time_seq = time.perf_counter() - start
+        
+        # Batched (single call)
+        x_batch = torch.randn(n_particles, dim, device=device)
+        v_batch = torch.randn(n_particles, dim, device=device)
+        sync(device)
+        start = time.perf_counter()
+        for _ in range(n_steps):
+            x_batch, v_batch = integrator.step(x_batch, v_batch, force_fn, dt=0.01)
+        sync(device)
+        time_batch = time.perf_counter() - start
+        
+        # Batched should be significantly faster
+        assert time_batch < time_seq, f"Batched ({time_batch:.4f}s) should be faster than sequential ({time_seq:.4f}s)"
+
+
 class TestDifferentiability:
     """Test that integrators support gradient computation."""
     
@@ -358,6 +503,23 @@ class TestDifferentiability:
             return -k * x
         for _ in range(10):
             x, v = integrator.step(x, v, force_fn, dt=0.01)
+        loss = x.pow(2).sum()
+        loss.backward()
+        assert k.grad is not None
+        assert torch.isfinite(k.grad)
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_nhc_differentiable(self, device):
+        """NoseHooverChain should be differentiable."""
+        nhc = NoseHooverChain(kT=0.5, mass=1.0, Q=1.0, n_chain=2)
+        k = torch.tensor([1.0], device=device, requires_grad=True)
+        x = torch.tensor([[1.0, 0.0]], device=device)
+        v = torch.tensor([[0.0, 1.0]], device=device)
+        xi = torch.zeros(1, 2, device=device)
+        def force_fn(x):
+            return -k * x
+        for _ in range(10):
+            x, v, xi = nhc.step(x, v, xi, force_fn, dt=0.01, ndof=2)
         loss = x.pow(2).sum()
         loss.backward()
         assert k.grad is not None

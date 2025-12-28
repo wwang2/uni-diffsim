@@ -152,44 +152,54 @@ class NoseHooverChain:
     def step(self, x: torch.Tensor, v: torch.Tensor, xi: torch.Tensor,
              force_fn: ForceFunc, dt: float, ndof: int
              ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Single NHC step. Returns (new_x, new_v, new_xi)."""
+        """Single NHC step. Returns (new_x, new_v, new_xi).
+        
+        Uses functional updates to maintain differentiability.
+        """
         KE = 0.5 * self.mass * (v**2).sum(dim=-1, keepdim=True)
         G = (2 * KE.squeeze(-1) - ndof * self.kT) / self.Q
-        xi_new = xi.clone()
         
+        # Store xi values in list for functional updates
+        xi_list = [xi[..., j] for j in range(self.n_chain)]
+        
+        # First thermostat half-step (chain from end to start)
         for j in range(self.n_chain - 1, -1, -1):
             if j == self.n_chain - 1:
-                xi_new[..., j] = xi[..., j] + (dt / 4) * G
+                xi_list[j] = xi_list[j] + (dt / 4) * G
             else:
-                xi_new[..., j] = xi[..., j] * torch.exp(-xi_new[..., j+1] * dt / 8)
-                xi_new[..., j] = xi_new[..., j] + (dt / 4) * G
-                xi_new[..., j] = xi_new[..., j] * torch.exp(-xi_new[..., j+1] * dt / 8)
+                xi_list[j] = xi_list[j] * torch.exp(-xi_list[j+1] * dt / 8)
+                xi_list[j] = xi_list[j] + (dt / 4) * G
+                xi_list[j] = xi_list[j] * torch.exp(-xi_list[j+1] * dt / 8)
             if j == 0:
-                v = v * torch.exp(-xi_new[..., 0:1] * dt / 2)
+                v = v * torch.exp(-xi_list[0].unsqueeze(-1) * dt / 2)
                 KE = 0.5 * self.mass * (v**2).sum(dim=-1, keepdim=True)
             G = (2 * KE.squeeze(-1) - ndof * self.kT) / self.Q if j == 0 else \
-                (self.Q * xi_new[..., j-1]**2 - self.kT) / self.Q
+                (self.Q * xi_list[j-1]**2 - self.kT) / self.Q
         
+        # Velocity-Verlet for physical degrees of freedom
         v = v + (dt / 2) * force_fn(x) / self.mass
         x = x + dt * v
         v = v + (dt / 2) * force_fn(x) / self.mass
         
+        # Second thermostat half-step (chain from start to end)
         KE = 0.5 * self.mass * (v**2).sum(dim=-1, keepdim=True)
         G = (2 * KE.squeeze(-1) - ndof * self.kT) / self.Q
         
         for j in range(self.n_chain):
             if j == 0:
-                v = v * torch.exp(-xi_new[..., 0:1] * dt / 2)
+                v = v * torch.exp(-xi_list[0].unsqueeze(-1) * dt / 2)
                 KE = 0.5 * self.mass * (v**2).sum(dim=-1, keepdim=True)
                 G = (2 * KE.squeeze(-1) - ndof * self.kT) / self.Q
             if j == self.n_chain - 1:
-                xi_new[..., j] = xi_new[..., j] + (dt / 4) * G
+                xi_list[j] = xi_list[j] + (dt / 4) * G
             else:
-                xi_new[..., j] = xi_new[..., j] * torch.exp(-xi_new[..., j+1] * dt / 8)
-                xi_new[..., j] = xi_new[..., j] + (dt / 4) * G
-                xi_new[..., j] = xi_new[..., j] * torch.exp(-xi_new[..., j+1] * dt / 8)
-            G = (self.Q * xi_new[..., j]**2 - self.kT) / self.Q
+                xi_list[j] = xi_list[j] * torch.exp(-xi_list[j+1] * dt / 8)
+                xi_list[j] = xi_list[j] + (dt / 4) * G
+                xi_list[j] = xi_list[j] * torch.exp(-xi_list[j+1] * dt / 8)
+            G = (self.Q * xi_list[j]**2 - self.kT) / self.Q
         
+        # Stack back to tensor
+        xi_new = torch.stack(xi_list, dim=-1)
         return x, v, xi_new
     
     def run(self, x0: torch.Tensor, v0: torch.Tensor | None, force_fn: ForceFunc,

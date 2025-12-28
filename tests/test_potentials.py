@@ -263,3 +263,56 @@ class TestGradientConsistency:
         
         assert torch.allclose(f_auto, f_fd, rtol=1e-2)
 
+
+class TestPotentialDifferentiability:
+    """Test that potentials support gradient computation through parameters."""
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_double_well_differentiable(self, device):
+        """DoubleWell energy should be differentiable."""
+        dw = DoubleWell().to(device)
+        x = torch.tensor([0.5], device=device, requires_grad=True)
+        u = dw.energy(x)
+        u.backward()
+        assert x.grad is not None
+        assert torch.isfinite(x.grad)
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_muller_brown_differentiable(self, device):
+        """MullerBrown energy should be differentiable."""
+        mb = MullerBrown().to(device)
+        xy = torch.tensor([[0.0, 0.5]], device=device, requires_grad=True)
+        u = mb.energy(xy)
+        u.backward()
+        assert xy.grad is not None
+        assert torch.isfinite(xy.grad).all()
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_lj_differentiable(self, device):
+        """LennardJones energy should be differentiable."""
+        lj = LennardJones().to(device)
+        x = torch.tensor([[0.0, 0.0], [1.5, 0.0]], device=device, requires_grad=True)
+        u = lj.energy(x)
+        u.backward()
+        assert x.grad is not None
+        assert torch.isfinite(x.grad).all()
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_harmonic_differentiable(self, device):
+        """Harmonic energy should be differentiable."""
+        harm = Harmonic(k=1.0).to(device)
+        x = torch.tensor([[1.0, 2.0]], device=device, requires_grad=True)
+        u = harm.energy(x)
+        u.backward()
+        assert x.grad is not None
+        assert torch.isfinite(x.grad).all()
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_hessian_differentiable(self, device):
+        """Hessian computation should work."""
+        dw = DoubleWell().to(device)
+        x = torch.tensor([[0.5]], device=device)
+        H = dw.hessian(x)
+        assert H.shape == (1, 1, 1)
+        assert torch.isfinite(H).all()
+
