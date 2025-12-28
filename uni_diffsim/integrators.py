@@ -10,9 +10,14 @@ Integrators:
 - NoseHooverChain: Deterministic thermostat
 - ESH: Energy Sampling Hamiltonian (deterministic ergodic sampling)
 - GLE: Generalized Langevin with colored noise
+
+All integrator parameters (gamma, kT, mass, etc.) are registered as nn.Parameters
+for automatic differentiation. Gradients w.r.t. these parameters can be computed
+via backpropagation through the trajectory.
 """
 
 import torch
+import torch.nn as nn
 from typing import Callable
 import math
 
@@ -21,21 +26,26 @@ ForceFunc = Callable[[torch.Tensor], torch.Tensor]
 GradFunc = Callable[[torch.Tensor], torch.Tensor]  # For ESH: gradient of energy
 
 
-class OverdampedLangevin:
+class OverdampedLangevin(nn.Module):
     """Overdamped Langevin dynamics: dx = F/γ dt + √(2kT/γ) dW.
     
     High-friction limit where inertia is negligible.
     Samples from Boltzmann distribution p(x) ∝ exp(-U(x)/kT).
+    
+    Args:
+        gamma: Friction coefficient. Differentiable parameter.
+        kT: Thermal energy (temperature × Boltzmann constant). Differentiable parameter.
     """
     
     def __init__(self, gamma: float = 1.0, kT: float = 1.0):
-        self.gamma = gamma
-        self.kT = kT
+        super().__init__()
+        self.gamma = nn.Parameter(torch.tensor(gamma))
+        self.kT = nn.Parameter(torch.tensor(kT))
     
     def step(self, x: torch.Tensor, force_fn: ForceFunc, dt: float) -> torch.Tensor:
         """Single integration step. Returns new positions."""
         force = force_fn(x)
-        noise_scale = math.sqrt(2 * self.kT * dt / self.gamma)
+        noise_scale = torch.sqrt(2 * self.kT * dt / self.gamma)
         return x + (force / self.gamma) * dt + noise_scale * torch.randn_like(x)
     
     def run(self, x0: torch.Tensor, force_fn: ForceFunc, dt: float, 
@@ -43,38 +53,41 @@ class OverdampedLangevin:
         """Run trajectory. Returns (n_stored, ..., dim) positions."""
         x = x0
         n_stored = n_steps // store_every + 1
-        traj = torch.empty((n_stored,) + x0.shape, device=x0.device, dtype=x0.dtype)
-        traj[0] = x0
-        idx = 1
+        traj_list = [x0]
         for i in range(1, n_steps + 1):
             x = self.step(x, force_fn, dt)
             if i % store_every == 0:
-                traj[idx] = x
-                idx += 1
-        return traj
+                traj_list.append(x)
+        return torch.stack(traj_list, dim=0)
 
 
-class BAOAB:
+class BAOAB(nn.Module):
     """BAOAB splitting for underdamped Langevin dynamics.
     
     B: velocity kick (half), A: position drift (half), O: Ornstein-Uhlenbeck noise,
     A: position drift (half), B: velocity kick (half).
     
     Excellent sampling properties with low discretization error.
+    
+    Args:
+        gamma: Friction coefficient. Differentiable parameter.
+        kT: Thermal energy. Differentiable parameter.
+        mass: Particle mass. Differentiable parameter.
     """
     
     def __init__(self, gamma: float = 1.0, kT: float = 1.0, mass: float = 1.0):
-        self.gamma = gamma
-        self.kT = kT
-        self.mass = mass
+        super().__init__()
+        self.gamma = nn.Parameter(torch.tensor(gamma))
+        self.kT = nn.Parameter(torch.tensor(kT))
+        self.mass = nn.Parameter(torch.tensor(mass))
     
     def step(self, x: torch.Tensor, v: torch.Tensor, force_fn: ForceFunc, 
              dt: float) -> tuple[torch.Tensor, torch.Tensor]:
         """Single BAOAB step. Returns (new_x, new_v)."""
         v = v + (dt / 2) * force_fn(x) / self.mass
         x = x + (dt / 2) * v
-        alpha = math.exp(-self.gamma * dt)
-        sigma = math.sqrt((self.kT / self.mass) * (1 - alpha**2))
+        alpha = torch.exp(-self.gamma * dt)
+        sigma = torch.sqrt((self.kT / self.mass) * (1 - alpha**2))
         v = alpha * v + sigma * torch.randn_like(v)
         x = x + (dt / 2) * v
         v = v + (dt / 2) * force_fn(x) / self.mass
@@ -85,29 +98,30 @@ class BAOAB:
             ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run trajectory. Returns (positions, velocities) each (n_stored, ...)."""
         x = x0
-        v = v0 if v0 is not None else torch.randn_like(x0) * math.sqrt(self.kT / self.mass)
-        n_stored = n_steps // store_every + 1
-        traj_x = torch.empty((n_stored,) + x0.shape, device=x0.device, dtype=x0.dtype)
-        traj_v = torch.empty((n_stored,) + x0.shape, device=x0.device, dtype=x0.dtype)
-        traj_x[0], traj_v[0] = x0, v
-        idx = 1
+        v = v0 if v0 is not None else torch.randn_like(x0) * torch.sqrt(self.kT / self.mass)
+        traj_x_list = [x0]
+        traj_v_list = [v]
         for i in range(1, n_steps + 1):
             x, v = self.step(x, v, force_fn, dt)
             if i % store_every == 0:
-                traj_x[idx], traj_v[idx] = x, v
-                idx += 1
-        return traj_x, traj_v
+                traj_x_list.append(x)
+                traj_v_list.append(v)
+        return torch.stack(traj_x_list, dim=0), torch.stack(traj_v_list, dim=0)
 
 
-class VelocityVerlet:
+class VelocityVerlet(nn.Module):
     """Symplectic velocity Verlet integrator (NVE ensemble).
     
     Preserves phase-space volume and has excellent energy conservation.
     No thermostat - samples microcanonical ensemble.
+    
+    Args:
+        mass: Particle mass. Differentiable parameter.
     """
     
     def __init__(self, mass: float = 1.0):
-        self.mass = mass
+        super().__init__()
+        self.mass = nn.Parameter(torch.tensor(mass))
     
     def step(self, x: torch.Tensor, v: torch.Tensor, force_fn: ForceFunc,
              dt: float) -> tuple[torch.Tensor, torch.Tensor]:
@@ -122,32 +136,36 @@ class VelocityVerlet:
             ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run trajectory. Returns (positions, velocities)."""
         x, v = x0, v0
-        n_stored = n_steps // store_every + 1
-        traj_x = torch.empty((n_stored,) + x0.shape, device=x0.device, dtype=x0.dtype)
-        traj_v = torch.empty((n_stored,) + x0.shape, device=x0.device, dtype=x0.dtype)
-        traj_x[0], traj_v[0] = x0, v0
-        idx = 1
+        traj_x_list = [x0]
+        traj_v_list = [v0]
         for i in range(1, n_steps + 1):
             x, v = self.step(x, v, force_fn, dt)
             if i % store_every == 0:
-                traj_x[idx], traj_v[idx] = x, v
-                idx += 1
-        return traj_x, traj_v
+                traj_x_list.append(x)
+                traj_v_list.append(v)
+        return torch.stack(traj_x_list, dim=0), torch.stack(traj_v_list, dim=0)
 
 
-class NoseHooverChain:
+class NoseHooverChain(nn.Module):
     """Nosé-Hoover chain thermostat for deterministic canonical sampling.
     
     Extends phase space with thermostat variables to sample NVT ensemble
     without stochastic noise. Chain length > 1 improves ergodicity.
+    
+    Args:
+        kT: Thermal energy. Differentiable parameter.
+        mass: Particle mass. Differentiable parameter.
+        Q: Thermostat mass. Differentiable parameter.
+        n_chain: Number of thermostat variables (not differentiable, structural).
     """
     
     def __init__(self, kT: float = 1.0, mass: float = 1.0, 
                  Q: float = 1.0, n_chain: int = 2):
-        self.kT = kT
-        self.mass = mass
-        self.Q = Q
-        self.n_chain = n_chain
+        super().__init__()
+        self.kT = nn.Parameter(torch.tensor(kT))
+        self.mass = nn.Parameter(torch.tensor(mass))
+        self.Q = nn.Parameter(torch.tensor(Q))
+        self.n_chain = n_chain  # structural parameter, not differentiable
     
     def step(self, x: torch.Tensor, v: torch.Tensor, xi: torch.Tensor,
              force_fn: ForceFunc, dt: float, ndof: int
@@ -207,25 +225,22 @@ class NoseHooverChain:
             ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run trajectory. Returns (positions, velocities)."""
         x = x0
-        v = v0 if v0 is not None else torch.randn_like(x0) * math.sqrt(self.kT / self.mass)
+        v = v0 if v0 is not None else torch.randn_like(x0) * torch.sqrt(self.kT / self.mass)
         ndof = x0.shape[-1]
         xi_shape = x0.shape[:-1] + (self.n_chain,)
         xi = torch.zeros(xi_shape, device=x0.device, dtype=x0.dtype)
         
-        n_stored = n_steps // store_every + 1
-        traj_x = torch.empty((n_stored,) + x0.shape, device=x0.device, dtype=x0.dtype)
-        traj_v = torch.empty((n_stored,) + x0.shape, device=x0.device, dtype=x0.dtype)
-        traj_x[0], traj_v[0] = x0, v
-        idx = 1
+        traj_x_list = [x0]
+        traj_v_list = [v]
         for i in range(1, n_steps + 1):
             x, v, xi = self.step(x, v, xi, force_fn, dt, ndof)
             if i % store_every == 0:
-                traj_x[idx], traj_v[idx] = x, v
-                idx += 1
-        return traj_x, traj_v
+                traj_x_list.append(x)
+                traj_v_list.append(v)
+        return torch.stack(traj_x_list, dim=0), torch.stack(traj_v_list, dim=0)
 
 
-class ESH:
+class ESH(nn.Module):
     """Energy Sampling Hamiltonian dynamics for deterministic ergodic sampling.
     
     Uses non-Newtonian kinetic energy K(v) = d/2 * log(v²/d).
@@ -243,10 +258,14 @@ class ESH:
     
     Note: Works best in d >= 2 dimensions. Uses scaled dynamics with
     unit velocity u = v/|v| and log-magnitude r = log|v|.
+    
+    Args:
+        eps: Default step size. Differentiable parameter.
     """
     
     def __init__(self, eps: float = 0.1):
-        self.eps = eps
+        super().__init__()
+        self.eps = nn.Parameter(torch.tensor(eps))
     
     def _u_r_step(self, u: torch.Tensor, r: torch.Tensor, 
                   grad: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
@@ -347,23 +366,21 @@ class ESH:
         
         r = torch.zeros(x0.shape[:-1], device=x0.device, dtype=x0.dtype)
         
-        n_stored = n_steps // store_every + 1
-        traj_x = torch.empty((n_stored,) + x0.shape, device=x0.device, dtype=x0.dtype)
-        traj_u = torch.empty((n_stored,) + x0.shape, device=x0.device, dtype=x0.dtype)
-        traj_r = torch.empty((n_stored,) + r.shape, device=x0.device, dtype=x0.dtype)
-        traj_x[0], traj_u[0], traj_r[0] = x0, u, r
+        traj_x_list = [x0]
+        traj_u_list = [u]
+        traj_r_list = [r]
         
-        idx = 1
         for i in range(1, n_steps + 1):
             x, u, r = self.step(x, u, r, grad_fn, eps)
             if i % store_every == 0:
-                traj_x[idx], traj_u[idx], traj_r[idx] = x, u, r
-                idx += 1
+                traj_x_list.append(x)
+                traj_u_list.append(u)
+                traj_r_list.append(r)
         
-        return traj_x, traj_u, traj_r
+        return torch.stack(traj_x_list, dim=0), torch.stack(traj_u_list, dim=0), torch.stack(traj_r_list, dim=0)
 
 
-class GLE:
+class GLE(nn.Module):
     """Generalized Langevin Equation with colored noise.
     
     Implements dynamics with memory kernel using Prony series decomposition:
@@ -380,29 +397,29 @@ class GLE:
     - Reduces to standard Langevin when n_modes=1 and c=γ
     
     Reference: Ceriotti et al., J. Chem. Theory Comput. 6, 1170 (2010)
+    
+    Args:
+        kT: Temperature. Differentiable parameter.
+        mass: Particle mass. Differentiable parameter.
+        gamma: Decay rates for memory kernel modes. Differentiable parameter.
+        c: Coupling strengths for each mode. Differentiable parameter.
     """
     
     def __init__(self, kT: float = 1.0, mass: float = 1.0,
                  gamma: list[float] | None = None,
                  c: list[float] | None = None):
-        """
-        Args:
-            kT: Temperature
-            mass: Particle mass  
-            gamma: Decay rates for memory kernel modes
-            c: Coupling strengths for each mode
-        """
-        self.kT = kT
-        self.mass = mass
+        super().__init__()
+        self.kT = nn.Parameter(torch.tensor(kT))
+        self.mass = nn.Parameter(torch.tensor(mass))
         
         # Default: single mode (standard Langevin-like)
         if gamma is None:
             gamma = [1.0]
         if c is None:
             c = list(gamma)
-            
-        self.gamma = gamma
-        self.c = c
+        
+        self.gamma = nn.Parameter(torch.tensor(gamma))
+        self.c = nn.Parameter(torch.tensor(c))
         self.n_modes = len(gamma)
     
     def step(self, x: torch.Tensor, v: torch.Tensor, s: torch.Tensor,
@@ -420,15 +437,17 @@ class GLE:
         Returns:
             (new_x, new_v, new_s)
         """
-        device, dtype = x.device, x.dtype
-        gamma = torch.tensor(self.gamma, device=device, dtype=dtype)
-        c = torch.tensor(self.c, device=device, dtype=dtype)
+        # Ensure parameters are on the same device as input
+        gamma = self.gamma.to(x.device)
+        c = self.c.to(x.device)
+        kT = self.kT.to(x.device)
+        mass = self.mass.to(x.device)
         
         # Friction from auxiliary variables
         friction = s.sum(dim=-1)
         
         # B: Half-step velocity
-        v = v + (dt / 2) * (force_fn(x) - friction) / self.mass
+        v = v + (dt / 2) * (force_fn(x) - friction) / mass
         
         # A: Half-step position
         x = x + (dt / 2) * v
@@ -436,7 +455,7 @@ class GLE:
         # O: Update auxiliary variables (vectorized)
         alpha = torch.exp(-gamma * dt)
         # Noise variance from fluctuation-dissipation
-        sigma = torch.sqrt(c * self.kT * (1 - alpha**2))
+        sigma = torch.sqrt(c * kT * (1 - alpha**2))
         noise = torch.randn_like(s) * sigma
         
         # Drift coefficient
@@ -448,7 +467,7 @@ class GLE:
         
         # B: Half-step velocity with updated friction
         friction = s.sum(dim=-1)
-        v = v + (dt / 2) * (force_fn(x) - friction) / self.mass
+        v = v + (dt / 2) * (force_fn(x) - friction) / mass
         
         return x, v, s
     
@@ -458,26 +477,28 @@ class GLE:
         """Run GLE trajectory. Returns (positions, velocities)."""
         device, dtype = x0.device, x0.dtype
         x = x0
-        v = v0 if v0 is not None else torch.randn_like(x0) * math.sqrt(self.kT / self.mass)
+        
+        # Ensure parameters are on correct device
+        kT = self.kT.to(device)
+        mass = self.mass.to(device)
+        c = self.c.to(device)
+        
+        v = v0 if v0 is not None else torch.randn_like(x0) * torch.sqrt(kT / mass)
         
         # Initialize auxiliary variables at thermal equilibrium
-        c = torch.tensor(self.c, device=device, dtype=dtype)
         s_shape = x0.shape + (self.n_modes,)
-        s = torch.randn(s_shape, device=device, dtype=dtype) * torch.sqrt(c * self.kT)
+        s = torch.randn(s_shape, device=device, dtype=dtype) * torch.sqrt(c * kT)
         
-        n_stored = n_steps // store_every + 1
-        traj_x = torch.empty((n_stored,) + x0.shape, device=device, dtype=dtype)
-        traj_v = torch.empty((n_stored,) + x0.shape, device=device, dtype=dtype)
-        traj_x[0], traj_v[0] = x0, v
+        traj_x_list = [x0]
+        traj_v_list = [v]
         
-        idx = 1
         for i in range(1, n_steps + 1):
             x, v, s = self.step(x, v, s, force_fn, dt)
             if i % store_every == 0:
-                traj_x[idx], traj_v[idx] = x, v
-                idx += 1
+                traj_x_list.append(x)
+                traj_v_list.append(v)
         
-        return traj_x, traj_v
+        return torch.stack(traj_x_list, dim=0), torch.stack(traj_v_list, dim=0)
 
 
 def kinetic_energy(v: torch.Tensor, mass: float = 1.0) -> torch.Tensor:
