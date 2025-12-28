@@ -42,11 +42,14 @@ class DoubleWell(Potential):
     
     Minima at x = ±1, barrier at x = 0 with height a.
     Input shape: (...,) or (..., 1). Output shape: (...,).
+    
+    Args:
+        barrier_height: Height of the barrier at x=0. Differentiable parameter.
     """
     
     def __init__(self, barrier_height: float = 1.0):
         super().__init__()
-        self.barrier_height = barrier_height
+        self.barrier_height = nn.Parameter(torch.tensor(barrier_height))
     
     def energy(self, x: torch.Tensor) -> torch.Tensor:
         if x.shape[-1:] == (1,):
@@ -59,24 +62,33 @@ class MullerBrown(Potential):
     
     Has 3 minima and 2 saddle points.
     Input shape: (..., 2). Output shape: (...,).
+    
+    All parameters are differentiable. The default values correspond to the
+    standard Müller-Brown potential.
     """
     
-    # Standard parameters (registered as buffers for device handling)
-    _A = torch.tensor([-200., -100., -170., 15.])
-    _a = torch.tensor([-1., -1., -6.5, 0.7])
-    _b = torch.tensor([0., 0., 11., 0.6])
-    _c = torch.tensor([-10., -10., -6.5, 0.7])
-    _x0 = torch.tensor([1., 0., -0.5, -1.])
-    _y0 = torch.tensor([0., 0.5, 1.5, 1.])
+    # Standard parameter values
+    _A_default = torch.tensor([-200., -100., -170., 15.])
+    _a_default = torch.tensor([-1., -1., -6.5, 0.7])
+    _b_default = torch.tensor([0., 0., 11., 0.6])
+    _c_default = torch.tensor([-10., -10., -6.5, 0.7])
+    _x0_default = torch.tensor([1., 0., -0.5, -1.])
+    _y0_default = torch.tensor([0., 0.5, 1.5, 1.])
     
-    def __init__(self):
+    def __init__(self, 
+                 A: torch.Tensor | None = None,
+                 a: torch.Tensor | None = None,
+                 b: torch.Tensor | None = None,
+                 c: torch.Tensor | None = None,
+                 x0: torch.Tensor | None = None,
+                 y0: torch.Tensor | None = None):
         super().__init__()
-        self.register_buffer("A", self._A.clone())
-        self.register_buffer("a", self._a.clone())
-        self.register_buffer("b", self._b.clone())
-        self.register_buffer("c", self._c.clone())
-        self.register_buffer("x0", self._x0.clone())
-        self.register_buffer("y0", self._y0.clone())
+        self.A = nn.Parameter(A.clone() if A is not None else self._A_default.clone())
+        self.a = nn.Parameter(a.clone() if a is not None else self._a_default.clone())
+        self.b = nn.Parameter(b.clone() if b is not None else self._b_default.clone())
+        self.c = nn.Parameter(c.clone() if c is not None else self._c_default.clone())
+        self.x0 = nn.Parameter(x0.clone() if x0 is not None else self._x0_default.clone())
+        self.y0 = nn.Parameter(y0.clone() if y0 is not None else self._y0_default.clone())
     
     def energy(self, xy: torch.Tensor) -> torch.Tensor:
         """xy: (..., 2) -> (...)"""
@@ -90,22 +102,59 @@ class MullerBrown(Potential):
 
 
 class LennardJones(Potential):
-    """N-particle Lennard-Jones potential.
+    """N-particle Lennard-Jones potential with optional periodic boundary conditions.
     
     U = 4ε Σ_{i<j} [(σ/r_ij)¹² - (σ/r_ij)⁶]
     
+    For PBC, uses minimum image convention: distances are wrapped to [-L/2, L/2].
+    
     Input shape: (..., n_particles, dim). Output shape: (...,).
+    
+    Args:
+        eps: LJ well depth (default 1.0). Differentiable parameter.
+        sigma: LJ length scale (default 1.0). Differentiable parameter.
+        box_size: Simulation box size for PBC. Can be:
+            - None: no periodic boundaries (default)
+            - float: cubic/square box with side length L
+            - Tensor of shape (dim,): rectangular box with different lengths per dimension
+            Note: box_size is a buffer (not differentiable) since it defines geometry.
     """
     
-    def __init__(self, eps: float = 1.0, sigma: float = 1.0):
+    def __init__(self, eps: float = 1.0, sigma: float = 1.0, 
+                 box_size: float | torch.Tensor | None = None):
         super().__init__()
-        self.eps = eps
-        self.sigma = sigma
+        self.eps = nn.Parameter(torch.tensor(eps))
+        self.sigma = nn.Parameter(torch.tensor(sigma))
+        
+        if box_size is not None:
+            if isinstance(box_size, (int, float)):
+                box_size = torch.tensor([box_size])
+            elif not isinstance(box_size, torch.Tensor):
+                box_size = torch.tensor(box_size)
+            self.register_buffer("box_size", box_size.float())
+        else:
+            self.box_size = None
+    
+    def _minimum_image(self, diff: torch.Tensor) -> torch.Tensor:
+        """Apply minimum image convention for periodic boundaries.
+        
+        diff: (..., dim) displacement vectors
+        Returns: wrapped displacements in [-L/2, L/2]
+        """
+        if self.box_size is None:
+            return diff
+        # Wrap to [-L/2, L/2] using remainder
+        # box_size broadcasts: (dim,) with diff (..., dim)
+        return diff - self.box_size * torch.round(diff / self.box_size)
     
     def energy(self, x: torch.Tensor) -> torch.Tensor:
         """x: (..., n_particles, dim) -> (...)"""
-        # Pairwise distances: (..., n, n, dim)
+        # Pairwise displacements: (..., n, n, dim)
         diff = x.unsqueeze(-2) - x.unsqueeze(-3)
+        
+        # Apply minimum image convention for PBC
+        diff = self._minimum_image(diff)
+        
         r2 = (diff**2).sum(-1)  # (..., n, n)
         
         # Upper triangular mask (i < j pairs only)
@@ -124,13 +173,17 @@ class Harmonic(Potential):
     """Simple harmonic oscillator: U(x) = 0.5 * k * ||x - x0||².
     
     Input shape: (..., d). Output shape: (...,).
+    
+    Args:
+        k: Spring constant. Differentiable parameter.
+        center: Equilibrium position. Differentiable parameter if provided.
     """
     
     def __init__(self, k: float = 1.0, center: torch.Tensor | None = None):
         super().__init__()
-        self.k = k
+        self.k = nn.Parameter(torch.tensor(k))
         if center is not None:
-            self.register_buffer("center", center)
+            self.center = nn.Parameter(center.clone())
         else:
             self.center = None
     
@@ -199,7 +252,7 @@ if __name__ == "__main__":
     xy = torch.stack([X, Y], dim=-1)
     U = mb.energy(xy)
     levels = np.linspace(-150, 100, 30)
-    cs = ax.contourf(X.numpy(), Y.numpy(), U.detach().numpy(), levels=levels, cmap='viridis')
+    cs = ax.contourf(X.numpy(), Y.numpy(), U.detach().numpy(), levels=levels, cmap='BuGn')
     ax.contour(X.numpy(), Y.numpy(), U.detach().numpy(), levels=levels, colors='k', linewidths=0.3)
     ax.set_xlabel('x')
     ax.set_ylabel('y')
@@ -207,7 +260,7 @@ if __name__ == "__main__":
     plt.colorbar(cs, ax=ax, label='U')
     ax.set_axisbelow(True)
     
-    # 3. LJ-7 cluster
+    # 3. LJ-7 cluster (no PBC)
     ax = axes[1, 0]
     lj = LennardJones()
     angles = torch.linspace(0, 2*np.pi, 7)[:-1]
@@ -225,23 +278,45 @@ if __name__ == "__main__":
     ax.set_ylabel('y')
     ax.set_axisbelow(True)
     
-    # 4. Batch computation demo
+    # 4. LJ cluster with periodic boundary conditions
     ax = axes[1, 1]
-    batch_sizes = [1, 10, 100, 1000, 10000]
-    times = []
-    import time
-    for bs in batch_sizes:
-        xy_batch = torch.randn(bs, 2)
-        _ = mb.energy(xy_batch)
-        start = time.perf_counter()
-        for _ in range(100):
-            _ = mb.energy(xy_batch)
-        times.append((time.perf_counter() - start) / 100 * 1000)
+    L = 4.0  # box size
+    lj_pbc = LennardJones(box_size=L)
     
-    ax.loglog(batch_sizes, times, 'o-', lw=2, markersize=8, color='#2ca02c')
-    ax.set_xlabel('Batch size')
-    ax.set_ylabel('Time (ms)')
-    ax.set_title('Vectorization Scaling', fontweight='bold')
+    # Create a 3x3 grid of particles in the box
+    n_side = 3
+    spacing = L / n_side
+    pos_pbc = torch.zeros(n_side * n_side, 2)
+    idx = 0
+    for i in range(n_side):
+        for j in range(n_side):
+            pos_pbc[idx, 0] = (i + 0.5) * spacing
+            pos_pbc[idx, 1] = (j + 0.5) * spacing
+            idx += 1
+    
+    # Draw the periodic box
+    box = plt.Rectangle((0, 0), L, L, fill=False, edgecolor='#333', lw=2, ls='--')
+    ax.add_patch(box)
+    
+    # Draw ghost images (periodic copies) in faded color
+    for dx in [-L, 0, L]:
+        for dy in [-L, 0, L]:
+            if dx == 0 and dy == 0:
+                continue  # skip the main box
+            ghost_pos = pos_pbc + torch.tensor([dx, dy])
+            ax.scatter(ghost_pos[:, 0].numpy(), ghost_pos[:, 1].numpy(),
+                      s=200, c='#1f77b4', alpha=0.2, edgecolor='none')
+    
+    # Draw main particles
+    ax.scatter(pos_pbc[:, 0].numpy(), pos_pbc[:, 1].numpy(),
+               s=400, c='#1f77b4', edgecolor='k', lw=1.5)
+    
+    ax.set_xlim(-L*0.5, L*1.5)
+    ax.set_ylim(-L*0.5, L*1.5)
+    ax.set_aspect('equal')
+    ax.set_title(f'LJ-9 with PBC (L={L}, U={lj_pbc.energy(pos_pbc).item():.2f})', fontweight='bold')
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
     ax.set_axisbelow(True)
     
     plt.savefig(os.path.join(assets_dir, "potentials.png"), dpi=150, 

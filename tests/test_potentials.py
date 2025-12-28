@@ -134,6 +134,128 @@ class TestLennardJones:
         # Force should be ~zero at equilibrium
         assert torch.allclose(f, torch.zeros_like(f), atol=1e-4)
     
+    # --- Periodic Boundary Condition Tests ---
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_pbc_minimum_image_wrapping(self, device):
+        """Particles across periodic boundary should interact via minimum image."""
+        L = 5.0
+        lj_pbc = LennardJones(eps=1.0, sigma=1.0, box_size=L).to(device)
+        lj_no_pbc = LennardJones(eps=1.0, sigma=1.0).to(device)
+        
+        # Two particles: one at (0.5, 0) and one at (4.5, 0)
+        # Real distance = 4.0, but with PBC: wrapped distance = 1.0
+        x_pbc = torch.tensor([[0.5, 0.0], [4.5, 0.0]], device=device)
+        # Equivalent non-PBC configuration: particles 1.0 apart
+        x_direct = torch.tensor([[0.0, 0.0], [1.0, 0.0]], device=device)
+        
+        u_pbc = lj_pbc.energy(x_pbc)
+        u_direct = lj_no_pbc.energy(x_direct)
+        
+        assert torch.isclose(u_pbc, u_direct, rtol=1e-5)
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_pbc_force_direction(self, device):
+        """Force should point through the periodic boundary when that's shorter."""
+        L = 5.0
+        lj = LennardJones(eps=1.0, sigma=1.0, box_size=L).to(device)
+        
+        # Particles at (0.5, 0) and (4.5, 0): wrapped distance is 1.0
+        # diff = x[1] - x[0] = (4.0, 0), wrapped to (-1.0, 0)
+        # So particle 1 is at x=-1.0 relative to particle 0 (via boundary)
+        x = torch.tensor([[0.5, 0.0], [4.5, 0.0]], device=device)
+        f = lj.force(x)
+        
+        # At r=1.0 (< r_eq~1.12), particles repel
+        # Particle 0 is pushed in +x (away from particle 1 at relative x=-1)
+        # Particle 1 is pushed in -x (away from particle 0 at relative x=+1)
+        assert f[0, 0].item() > 0  # particle 0: force in +x
+        assert f[1, 0].item() < 0  # particle 1: force in -x
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_pbc_rectangular_box(self, device):
+        """Test non-cubic box with different lengths per dimension."""
+        box_size = torch.tensor([4.0, 6.0], device=device)
+        lj = LennardJones(eps=1.0, sigma=1.0, box_size=box_size).to(device)
+        
+        # Test wrapping in x: particles at (0.5, 0) and (3.5, 0)
+        # x-distance: 3.0 direct, 1.0 wrapped (since Lx=4)
+        x1 = torch.tensor([[0.5, 0.0], [3.5, 0.0]], device=device)
+        # Equivalent: particles 1.0 apart
+        lj_ref = LennardJones(eps=1.0, sigma=1.0).to(device)
+        x_ref = torch.tensor([[0.0, 0.0], [1.0, 0.0]], device=device)
+        
+        assert torch.isclose(lj.energy(x1), lj_ref.energy(x_ref), rtol=1e-5)
+        
+        # Test wrapping in y: particles at (0, 0.5) and (0, 5.5)
+        # y-distance: 5.0 direct, 1.0 wrapped (since Ly=6)
+        x2 = torch.tensor([[0.0, 0.5], [0.0, 5.5]], device=device)
+        x_ref2 = torch.tensor([[0.0, 0.0], [0.0, 1.0]], device=device)
+        
+        assert torch.isclose(lj.energy(x2), lj_ref.energy(x_ref2), rtol=1e-5)
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_pbc_3d(self, device):
+        """Test PBC in 3D."""
+        L = 5.0
+        lj = LennardJones(eps=1.0, sigma=1.0, box_size=L).to(device)
+        
+        # Particles wrapping in z-direction
+        x = torch.tensor([[0.0, 0.0, 0.5], [0.0, 0.0, 4.5]], device=device)
+        lj_ref = LennardJones(eps=1.0, sigma=1.0).to(device)
+        x_ref = torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]], device=device)
+        
+        assert torch.isclose(lj.energy(x), lj_ref.energy(x_ref), rtol=1e-5)
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_pbc_batch_configurations(self, device):
+        """Test PBC with batched configurations."""
+        L = 5.0
+        lj = LennardJones(eps=1.0, sigma=1.0, box_size=L).to(device)
+        
+        # Batch of 3 configurations, each with 4 particles in 2D
+        x = torch.randn(3, 4, 2, device=device) * L  # positions may be outside [0, L]
+        u = lj.energy(x)
+        
+        assert u.shape == (3,)
+        assert torch.isfinite(u).all()
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_pbc_translation_invariance(self, device):
+        """Energy should be invariant under translation by box vector."""
+        L = 5.0
+        lj = LennardJones(eps=1.0, sigma=1.0, box_size=L).to(device)
+        
+        x = torch.tensor([[1.0, 1.0], [2.5, 2.0], [3.0, 4.0]], device=device)
+        u1 = lj.energy(x)
+        
+        # Translate all particles by box vector
+        x_shifted = x + torch.tensor([L, 0.0], device=device)
+        u2 = lj.energy(x_shifted)
+        
+        assert torch.isclose(u1, u2, rtol=1e-5)
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_pbc_gradient_consistency(self, device):
+        """Autograd force should match finite difference with PBC."""
+        L = 5.0
+        lj = LennardJones(eps=1.0, sigma=1.0, box_size=L).to(device)
+        
+        x = torch.tensor([[0.5, 0.5], [4.5, 0.5]], device=device)
+        f_auto = lj.force(x)
+        
+        eps = 1e-4
+        f_fd = torch.zeros_like(x)
+        for i in range(2):
+            for j in range(2):
+                x_plus = x.clone()
+                x_minus = x.clone()
+                x_plus[i, j] += eps
+                x_minus[i, j] -= eps
+                f_fd[i, j] = -(lj.energy(x_plus) - lj.energy(x_minus)) / (2 * eps)
+        
+        assert torch.allclose(f_auto, f_fd, rtol=1e-2)
+    
     @pytest.mark.parametrize("device", DEVICES)
     def test_energy_at_equilibrium(self, device):
         """Energy at equilibrium should be -eps."""
