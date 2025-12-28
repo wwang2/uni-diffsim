@@ -23,8 +23,8 @@ pip install -e ".[dev]"
 | `OverdampedLangevin` | Stochastic | High friction |
 | `BAOAB` | Stochastic | NVT sampler |
 | `VelocityVerlet` | Deterministic | NVE, symplectic |
-| `NoseHooverChain` | Deterministic | NVT thermostat |
-| `ESH` | Deterministic | Ergodic, very finicky ([arXiv:2111.02434](https://arxiv.org/abs/2111.02434)) |
+| `NoseHooverChain` | Deterministic, no Ergodicity guarantee | NVT thermostat |
+| `ESH` | Deterministic | no Ergodicity guarantee, very finicky ([arXiv:2111.02434](https://arxiv.org/abs/2111.02434)) |
 | `GLE` | Stochastic | Colored noise |
 
 
