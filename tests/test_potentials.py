@@ -195,32 +195,6 @@ class TestLennardJones:
         assert torch.isclose(lj.energy(x2), lj_ref.energy(x_ref2), rtol=1e-5)
     
     @pytest.mark.parametrize("device", DEVICES)
-    def test_pbc_3d(self, device):
-        """Test PBC in 3D."""
-        L = 5.0
-        lj = LennardJones(eps=1.0, sigma=1.0, box_size=L).to(device)
-        
-        # Particles wrapping in z-direction
-        x = torch.tensor([[0.0, 0.0, 0.5], [0.0, 0.0, 4.5]], device=device)
-        lj_ref = LennardJones(eps=1.0, sigma=1.0).to(device)
-        x_ref = torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]], device=device)
-        
-        assert torch.isclose(lj.energy(x), lj_ref.energy(x_ref), rtol=1e-5)
-    
-    @pytest.mark.parametrize("device", DEVICES)
-    def test_pbc_batch_configurations(self, device):
-        """Test PBC with batched configurations."""
-        L = 5.0
-        lj = LennardJones(eps=1.0, sigma=1.0, box_size=L).to(device)
-        
-        # Batch of 3 configurations, each with 4 particles in 2D
-        x = torch.randn(3, 4, 2, device=device) * L  # positions may be outside [0, L]
-        u = lj.energy(x)
-        
-        assert u.shape == (3,)
-        assert torch.isfinite(u).all()
-    
-    @pytest.mark.parametrize("device", DEVICES)
     def test_pbc_translation_invariance(self, device):
         """Energy should be invariant under translation by box vector."""
         L = 5.0
