@@ -145,10 +145,35 @@ if __name__ == "__main__":
     import numpy as np
     import matplotlib.pyplot as plt
     
+    # Plotting style
+    plt.rcParams.update({
+        "font.family": "monospace",
+        "font.monospace": ["DejaVu Sans Mono", "Menlo", "Consolas", "Monaco"],
+        "font.size": 11,
+        "axes.titlesize": 12,
+        "axes.labelsize": 11,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        "legend.fontsize": 9,
+        "axes.grid": True,
+        "grid.alpha": 0.25,
+        "grid.linewidth": 0.7,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.titlepad": 8.0,
+        "axes.labelpad": 4.0,
+        "xtick.direction": "out",
+        "ytick.direction": "out",
+        "legend.frameon": False,
+        "figure.facecolor": "white",
+        "axes.facecolor": "white",
+        "savefig.facecolor": "white",
+    })
+    
     assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
     os.makedirs(assets_dir, exist_ok=True)
     
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+    fig, axes = plt.subplots(2, 2, figsize=(10, 7), constrained_layout=True)
     
     # 1. Double well energy and force
     ax = axes[0, 0]
@@ -157,12 +182,13 @@ if __name__ == "__main__":
     u = dw.energy(x)
     f = dw.force(x.unsqueeze(-1)).squeeze()
     ax.plot(x.numpy(), u.detach().numpy(), 'k-', lw=2, label='U(x)')
-    ax.plot(x.numpy(), f.detach().numpy(), 'r--', lw=1.5, label='F(x)')
+    ax.plot(x.numpy(), f.detach().numpy(), '#d62728', ls='--', lw=1.5, label='F(x)')
     ax.axhline(0, color='gray', lw=0.5)
     ax.set_xlabel('x')
     ax.set_ylabel('Energy / Force')
-    ax.set_title('Double Well')
+    ax.set_title('Double Well', fontweight='bold')
     ax.legend()
+    ax.set_axisbelow(True)
     
     # 2. Müller-Brown contour
     ax = axes[0, 1]
@@ -170,15 +196,16 @@ if __name__ == "__main__":
     x = torch.linspace(-1.5, 1.2, 100)
     y = torch.linspace(-0.5, 2.0, 100)
     X, Y = torch.meshgrid(x, y, indexing='ij')
-    xy = torch.stack([X, Y], dim=-1)  # (100, 100, 2)
-    U = mb.energy(xy)  # (100, 100)
+    xy = torch.stack([X, Y], dim=-1)
+    U = mb.energy(xy)
     levels = np.linspace(-150, 100, 30)
     cs = ax.contourf(X.numpy(), Y.numpy(), U.detach().numpy(), levels=levels, cmap='viridis')
     ax.contour(X.numpy(), Y.numpy(), U.detach().numpy(), levels=levels, colors='k', linewidths=0.3)
     ax.set_xlabel('x')
     ax.set_ylabel('y')
-    ax.set_title('Müller-Brown')
+    ax.set_title('Müller-Brown', fontweight='bold')
     plt.colorbar(cs, ax=ax, label='U')
+    ax.set_axisbelow(True)
     
     # 3. LJ-7 cluster
     ax = axes[1, 0]
@@ -189,13 +216,14 @@ if __name__ == "__main__":
     positions[1:, 0] = r * torch.cos(angles)
     positions[1:, 1] = r * torch.sin(angles)
     ax.scatter(positions[:, 0].numpy(), positions[:, 1].numpy(), 
-               s=500, c='steelblue', edgecolor='k')
+               s=500, c='#1f77b4', edgecolor='k', lw=1.5)
     ax.set_xlim(-2, 2)
     ax.set_ylim(-2, 2)
     ax.set_aspect('equal')
-    ax.set_title(f'LJ-7 cluster (U={lj.energy(positions).item():.2f})')
+    ax.set_title(f'LJ-7 cluster (U={lj.energy(positions).item():.2f})', fontweight='bold')
     ax.set_xlabel('x')
     ax.set_ylabel('y')
+    ax.set_axisbelow(True)
     
     # 4. Batch computation demo
     ax = axes[1, 1]
@@ -204,20 +232,19 @@ if __name__ == "__main__":
     import time
     for bs in batch_sizes:
         xy_batch = torch.randn(bs, 2)
-        # warmup
         _ = mb.energy(xy_batch)
         start = time.perf_counter()
         for _ in range(100):
             _ = mb.energy(xy_batch)
         times.append((time.perf_counter() - start) / 100 * 1000)
     
-    ax.loglog(batch_sizes, times, 'o-', lw=2, markersize=8)
+    ax.loglog(batch_sizes, times, 'o-', lw=2, markersize=8, color='#2ca02c')
     ax.set_xlabel('Batch size')
     ax.set_ylabel('Time (ms)')
-    ax.set_title('Vectorization Scaling')
-    ax.grid(True, alpha=0.3)
+    ax.set_title('Vectorization Scaling', fontweight='bold')
+    ax.set_axisbelow(True)
     
-    plt.tight_layout()
-    plt.savefig(os.path.join(assets_dir, "potentials.png"), dpi=150)
+    plt.savefig(os.path.join(assets_dir, "potentials.png"), dpi=150, 
+                bbox_inches='tight', facecolor='white')
     print(f"Saved potentials plot to assets/potentials.png")
 
