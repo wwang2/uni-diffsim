@@ -373,13 +373,19 @@ class ESH(nn.Module):
     Note: Works best in d >= 2 dimensions. Uses scaled dynamics with
     unit velocity u = v/|v| and log-magnitude r = log|v|.
     
+    Stability: The integrator requires eps * |grad| / d << 1 for numerical
+    stability. Use max_grad_norm to clip gradients in high-curvature regions.
+    
     Args:
         eps: Default step size. Differentiable parameter.
+        max_grad_norm: Maximum gradient norm for stability. If None, no clipping.
+            Recommended: set to d / eps for stability (default: 10.0).
     """
     
-    def __init__(self, eps: float = 0.1):
+    def __init__(self, eps: float = 0.1, max_grad_norm: float | None = 10.0):
         super().__init__()
         self.eps = nn.Parameter(torch.tensor(eps))
+        self.max_grad_norm = max_grad_norm
     
     def _u_r_step(self, u: torch.Tensor, r: torch.Tensor, 
                   grad: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
@@ -389,6 +395,13 @@ class ESH(nn.Module):
         
         # Gradient norm and unit vector
         g_norm = grad.norm(dim=-1, keepdim=True).clamp(min=1e-10)
+        
+        # Clip gradient norm for numerical stability
+        # The integrator requires eps * |grad| / d << 1
+        if self.max_grad_norm is not None:
+            g_norm = g_norm.clamp(max=self.max_grad_norm)
+            grad = grad * (g_norm / grad.norm(dim=-1, keepdim=True).clamp(min=1e-10))
+        
         grad_e = grad / g_norm  # Unit vector in gradient direction
         
         # u · (-e) where e = grad/|grad|
@@ -644,6 +657,7 @@ if __name__ == "__main__":
     import os
     import numpy as np
     import matplotlib.pyplot as plt
+    from scipy.stats import gaussian_kde
     from .potentials import DoubleWell, DoubleWell2D, Harmonic
     
     # Plotting style
@@ -676,7 +690,7 @@ if __name__ == "__main__":
     assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
     os.makedirs(assets_dir, exist_ok=True)
     
-    fig, axes = plt.subplots(3, 3, figsize=(12, 10), constrained_layout=True)
+    fig, axes = plt.subplots(3, 3, figsize=(15, 12), constrained_layout=True)
     
     # Common colormap and style
     # Distinct colors for better separation
@@ -694,11 +708,32 @@ if __name__ == "__main__":
     dw = DoubleWell()
     kT = 0.5
     dt = 0.01
-    n_steps = 10000
+    n_steps = 50000
     n_batch = 50
     
     def force_fn_1d(x):
         return dw.force(x.unsqueeze(-1)).squeeze(-1)
+        
+    def add_1d_density_inset(ax, samples, potential, kT, color, label=''):
+        # Inset for 1D density
+        ax_ins = ax.inset_axes([0.65, 0.65, 0.3, 0.3])
+        
+        # Empirical density (histogram)
+        ax_ins.hist(samples, bins=40, density=True, range=(-2.5, 2.5),
+                   color=color, alpha=0.6, edgecolor='none')
+        
+        # Theoretical density
+        x_th = torch.linspace(-2.5, 2.5, 200)
+        u_th = potential.energy(x_th)
+        p_th = torch.exp(-u_th / kT)
+        p_th = p_th / (p_th.sum() * (x_th[1] - x_th[0]))
+        ax_ins.plot(x_th.numpy(), p_th.detach().numpy(), 'k-', lw=1.5, alpha=0.8)
+        
+        ax_ins.set_xticks([])
+        ax_ins.set_yticks([])
+        ax_ins.set_facecolor('none')
+        for spine in ax_ins.spines.values():
+            spine.set_visible(False)
     
     # 1. Overdamped Langevin
     ax = axes[0, 0]
@@ -714,6 +749,10 @@ if __name__ == "__main__":
     ax.set_ylabel('x')
     ax.set_title('Overdamped Langevin', fontweight='bold')
     ax.set_axisbelow(True)
+    # Add density inset
+    burn_in = 2000
+    samples_od = traj_od[burn_in//10:].flatten().detach().numpy()
+    add_1d_density_inset(ax, samples_od, dw, kT, colors['Overdamped'])
     
     # 2. BAOAB
     ax = axes[0, 1]
@@ -727,6 +766,9 @@ if __name__ == "__main__":
     ax.set_ylabel('x')
     ax.set_title('BAOAB', fontweight='bold')
     ax.set_axisbelow(True)
+    # Add density inset
+    samples_baoab = traj_baoab[burn_in//10:].flatten().detach().numpy()
+    add_1d_density_inset(ax, samples_baoab, dw, kT, colors['BAOAB'])
     
     # 3. GLE (colored noise)
     ax = axes[0, 2]
@@ -740,124 +782,132 @@ if __name__ == "__main__":
     ax.set_ylabel('x')
     ax.set_title('GLE (colored noise)', fontweight='bold')
     ax.set_axisbelow(True)
+    # Add density inset
+    samples_gle = traj_gle[burn_in//10:].flatten().detach().numpy()
+    add_1d_density_inset(ax, samples_gle, dw, kT, colors['GLE'])
     
-    # 4. Distribution comparison (1D stochastic methods)
-    ax = axes[1, 0]
-    burn_in = 2000
-    samples = {
-        'Overdamped': traj_od[burn_in//10:].flatten().detach().numpy(),
-        'BAOAB': traj_baoab[burn_in//10:].flatten().detach().numpy(),
-        'GLE': traj_gle[burn_in//10:].flatten().detach().numpy(),
-    }
-    # colors defined above
-    for name, s in samples.items():
-        ax.hist(s, bins=50, range=(-2.5, 2.5), density=True, alpha=0.5, 
-                label=name, color=colors[name], edgecolor='white', linewidth=0.5)
+    # 4. 2D Double Well Sampling (Row 2)
+    # Use DoubleWell2D instead of Harmonic
+    dw2d = DoubleWell2D(barrier_height=1.0, k_y=1.0)
+    kT_2d = 0.5 # Lower temperature to see hopping
     
-    x_th = torch.linspace(-2.5, 2.5, 200)
-    u_th = dw.energy(x_th).detach().numpy()
-    p_th = np.exp(-u_th / kT)
-    p_th = p_th / (p_th.sum() * (x_th[1] - x_th[0]).item())
-    ax.plot(x_th.numpy(), p_th, 'k-', lw=3, label='Boltzmann', zorder=10)
-    ax.set_xlabel('x')
-    ax.set_ylabel('Density')
-    ax.set_title('Sampling Distribution', fontweight='bold')
-    ax.legend(loc='upper right')
-    ax.set_axisbelow(True)
+    def grad_dw2d(x):
+        return -dw2d.force(x)
     
-    # 5. ESH, NH, BAOAB sampling on 2D Harmonic
-    ax = axes[1, 1]
-    harm_2d = Harmonic(k=1.0)
-    kT_2d = 1.0
+    # Prepare background contours
+    x_grid = torch.linspace(-2.0, 2.0, 100)
+    y_grid = torch.linspace(-2.0, 2.0, 100)
+    X, Y = torch.meshgrid(x_grid, y_grid, indexing='ij')
+    xy_grid = torch.stack([X, Y], dim=-1)
+    U_grid = dw2d.energy(xy_grid)
     
-    def grad_harm_2d(x):
-        return -harm_2d.force(x)
+    # Helper for 2D KDE insets
+    def add_2d_kde_inset(ax, samples, weights=None, color_map='Blues'):
+        ax_ins = ax.inset_axes([0.65, 0.65, 0.3, 0.3])
+        
+        # Kernel Density Estimation
+        try:
+            # Subsample for KDE if too large
+            if len(samples) > 5000:
+                idx = np.random.choice(len(samples), 5000, p=weights if weights is not None else None, replace=False)
+                kde_samples = samples[idx]
+                kde_weights = weights[idx] if weights is not None else None
+            else:
+                kde_samples = samples
+                kde_weights = weights
+                
+            x = kde_samples[:, 0]
+            y = kde_samples[:, 1]
+            
+            # Create grid for KDE evaluation
+            xmin, xmax = -2.0, 2.0
+            ymin, ymax = -2.0, 2.0
+            xx, yy = np.mgrid[xmin:xmax:50j, ymin:ymax:50j]
+            positions = np.vstack([xx.ravel(), yy.ravel()])
+            values = np.vstack([x, y])
+            
+            kernel = gaussian_kde(values, weights=kde_weights)
+            f = np.reshape(kernel(positions).T, xx.shape)
+            
+            ax_ins.contourf(xx, yy, f, cmap=color_map, levels=10)
+            ax_ins.set_xlim(xmin, xmax)
+            ax_ins.set_ylim(ymin, ymax)
+        except Exception:
+            # Fallback if KDE fails (e.g. singular matrix)
+            pass
+            
+        ax_ins.set_xticks([])
+        ax_ins.set_yticks([])
+        ax_ins.set_facecolor('white')
+        for spine in ax_ins.spines.values():
+            spine.set_visible(True) # Keep box for 2D density
     
-    # ESH: use random initial velocities
-    # Note: ESH requires time-weighting by exp(r) for correct Boltzmann samples
+    # Run samplers on 2D Double Well
+    n_steps_2d = 50000
+    
+    # ESH
     torch.manual_seed(42)
     esh = ESH(eps=0.1)
-    n_esh_chains = 20
-    x0_esh = torch.randn(n_esh_chains, 2)
-    u0_esh = torch.randn(n_esh_chains, 2)
+    x0_esh = torch.randn(20, 2)
+    u0_esh = torch.randn(20, 2)
     u0_esh = u0_esh / u0_esh.norm(dim=-1, keepdim=True)
     
-    traj_esh_2d, _, traj_r = esh.run(x0_esh, u0_esh, grad_harm_2d, n_steps=10000, 
-                                      dt=0.1, store_every=1)
-    # Get samples after burn-in and compute time weights
-    burn_in = 2000
-    esh_x = traj_esh_2d[burn_in:].detach().numpy()  # (n_steps, n_chains, 2)
-    esh_r = traj_r[burn_in:].detach().numpy()  # (n_steps, n_chains)
+    traj_esh_2d, _, traj_r = esh.run(x0_esh, u0_esh, grad_dw2d, n_steps=n_steps_2d, dt=0.1, store_every=1)
+    
+    burn_in = 5000
+    esh_x = traj_esh_2d[burn_in:].detach().numpy()
+    esh_r = traj_r[burn_in:].detach().numpy()
     esh_weights = np.exp(esh_r)
-    esh_weights = esh_weights / esh_weights.sum()  # normalize globally
+    esh_weights = esh_weights / esh_weights.sum()
     esh_samples = esh_x.reshape(-1, 2)
     esh_w_flat = esh_weights.flatten()
     
-    # Nosé-Hoover sampling
+    # Nosé-Hoover
     nh_2d = NoseHoover(kT=kT_2d, mass=1.0, Q=1.0)
     x0_nh = torch.randn(20, 2)
-    traj_nh_2d, _ = nh_2d.run(x0_nh, None, harm_2d.force, dt=0.05, n_steps=10000, store_every=1)
-    nh_samples = traj_nh_2d[2000:].reshape(-1, 2).detach().numpy()
+    traj_nh_2d, _ = nh_2d.run(x0_nh, None, dw2d.force, dt=0.05, n_steps=n_steps_2d, store_every=1)
+    nh_samples = traj_nh_2d[5000:].reshape(-1, 2).detach().numpy()
     
-    # BAOAB sampling
+    # BAOAB
     baoab_2d = BAOAB(gamma=1.0, kT=kT_2d, mass=1.0)
-    x0_baoab = torch.randn(200, 2)
-    traj_baoab_2d, _ = baoab_2d.run(x0_baoab, None, harm_2d.force, dt=0.05, n_steps=2000, store_every=20)
-    baoab_samples = traj_baoab_2d[20:].reshape(-1, 2).detach().numpy()
+    x0_baoab = torch.randn(200, 2) # More chains for baoab to cover space
+    traj_baoab_2d, _ = baoab_2d.run(x0_baoab, None, dw2d.force, dt=0.05, n_steps=10000, store_every=10)
+    baoab_samples = traj_baoab_2d[100:].reshape(-1, 2).detach().numpy()
     
-    # Plot circles for reference
-    theta = np.linspace(0, 2*np.pi, 100)
-    for r in [1.0, 1.5, 2.0]:
-        ax.plot(r*np.cos(theta), r*np.sin(theta), 'k--', alpha=0.4, lw=1.2)
+    # Plotting 2D
+    # ESH
+    ax = axes[1, 0]
+    ax.contour(X.numpy(), Y.numpy(), U_grid.detach().numpy(), levels=np.linspace(0, 5, 10), colors='k', alpha=0.2)
     
-    # For ESH, subsample based on weights (importance resampling)
-    n_resample = 5000
-    esh_idx = np.random.choice(len(esh_samples), size=n_resample, p=esh_w_flat)
-    esh_resampled = esh_samples[esh_idx]
-    
-    ax.scatter(esh_resampled[::5, 0], esh_resampled[::5, 1], s=8, alpha=0.4, 
-               c=colors['ESH'], label='ESH', edgecolors='none')
-    ax.scatter(nh_samples[::10, 0], nh_samples[::10, 1], s=8, alpha=0.4,
-               c=colors['NH'], label='NH', edgecolors='none')
-    ax.scatter(baoab_samples[::3, 0], baoab_samples[::3, 1], s=12, alpha=0.4,
-               c=colors['BAOAB'], label='BAOAB', edgecolors='none')
-    
-    ax.set_xlim(-3, 3)
-    ax.set_ylim(-3, 3)
+    # Importance resampling for scatter
+    esh_idx = np.random.choice(len(esh_samples), size=5000, p=esh_w_flat)
+    ax.scatter(esh_samples[esh_idx, 0], esh_samples[esh_idx, 1], s=5, alpha=0.3, 
+               c=colors['ESH'], edgecolors='none')
+               
+    ax.set_title('ESH (2D Double Well)', fontweight='bold')
     ax.set_aspect('equal')
-    ax.set_xlabel('x')
-    ax.set_ylabel('y')
-    ax.set_title('2D Harmonic Sampling', fontweight='bold')
-    ax.legend(loc='upper right', markerscale=3)
-    ax.set_axisbelow(True)
+    ax.set_xlim(-2.5, 2.5); ax.set_ylim(-2.5, 2.5)
+    add_2d_kde_inset(ax, esh_samples, esh_w_flat, color_map='Purples')
     
-    # 6. Radial distribution comparison (using time-weighted ESH)
+    # NH
+    ax = axes[1, 1]
+    ax.contour(X.numpy(), Y.numpy(), U_grid.detach().numpy(), levels=np.linspace(0, 5, 10), colors='k', alpha=0.2)
+    ax.scatter(nh_samples[::10, 0], nh_samples[::10, 1], s=5, alpha=0.3,
+               c=colors['NH'], edgecolors='none')
+    ax.set_title('Nosé-Hoover (2D Double Well)', fontweight='bold')
+    ax.set_aspect('equal')
+    ax.set_xlim(-2.5, 2.5); ax.set_ylim(-2.5, 2.5)
+    add_2d_kde_inset(ax, nh_samples, None, color_map='Reds')
+    
+    # BAOAB
     ax = axes[1, 2]
-    
-    # Compute radial distances
-    r_esh = np.sqrt(esh_resampled[:, 0]**2 + esh_resampled[:, 1]**2)
-    r_nh = np.sqrt(nh_samples[:, 0]**2 + nh_samples[:, 1]**2)
-    r_baoab = np.sqrt(baoab_samples[:, 0]**2 + baoab_samples[:, 1]**2)
-    
-    # Histogram
-    bins = np.linspace(0, 4, 40)
-    ax.hist(r_esh, bins=bins, density=True, alpha=0.5, color=colors['ESH'], 
-            label='ESH', edgecolor='white', linewidth=0.5)
-    ax.hist(r_nh, bins=bins, density=True, alpha=0.5, color=colors['NH'], 
-            label='NH', edgecolor='white', linewidth=0.5)
-    ax.hist(r_baoab, bins=bins, density=True, alpha=0.5, color=colors['BAOAB'], 
-            label='BAOAB', edgecolor='white', linewidth=0.5)
-    
-    # Theoretical: p(r) = r * exp(-r²/2kT) / kT for 2D harmonic with k=1
-    r_th = np.linspace(0, 4, 200)
-    p_th = r_th * np.exp(-r_th**2 / (2 * kT_2d)) / kT_2d
-    ax.plot(r_th, p_th, 'k-', lw=3, label='Theory', zorder=10)
-    
-    ax.set_xlabel('r = |x|')
-    ax.set_ylabel('p(r)')
-    ax.set_title('Radial Distribution', fontweight='bold')
-    ax.legend()
-    ax.set_axisbelow(True)
+    ax.contour(X.numpy(), Y.numpy(), U_grid.detach().numpy(), levels=np.linspace(0, 5, 10), colors='k', alpha=0.2)
+    ax.scatter(baoab_samples[::2, 0], baoab_samples[::2, 1], s=5, alpha=0.3,
+               c=colors['BAOAB'], edgecolors='none')
+    ax.set_title('BAOAB (2D Double Well)', fontweight='bold')
+    ax.set_aspect('equal')
+    ax.set_xlim(-2.5, 2.5); ax.set_ylim(-2.5, 2.5)
+    add_2d_kde_inset(ax, baoab_samples, None, color_map='Oranges')
     
     # 7. Benchmark Plot (Forward vs Backward)
     ax = axes[2, 0]
