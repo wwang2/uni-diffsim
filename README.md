@@ -1,6 +1,14 @@
-# uni-diffsim
 
-Differentiable molecular dynamics in PyTorch. Vectorized and gradient-ready. For research demo.
+# on unifying differentiable simulations
+
+> “All chaos is order misunderstood.”  
+> — Alexander Pope
+
+This repository explores questions I've wondered about for years:
+
+
+> What does it mean to "differentiate through simulation"?
+
 
 ```bash
 pip install -e ".[dev]"

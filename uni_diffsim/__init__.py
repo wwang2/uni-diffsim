@@ -3,7 +3,7 @@
 from .device import get_device, to_device, available_devices
 from .potentials import Potential, DoubleWell, MullerBrown, LennardJones, Harmonic
 from .integrators import (
-    OverdampedLangevin, BAOAB, VelocityVerlet, NoseHooverChain,
+    OverdampedLangevin, BAOAB, VelocityVerlet, NoseHooverChain, ESH, GLE,
     kinetic_energy, temperature,
 )
 
@@ -14,7 +14,6 @@ __all__ = [
     # Potentials
     "Potential", "DoubleWell", "MullerBrown", "LennardJones", "Harmonic",
     # Integrators
-    "OverdampedLangevin", "BAOAB", "VelocityVerlet", "NoseHooverChain",
+    "OverdampedLangevin", "BAOAB", "VelocityVerlet", "NoseHooverChain", "ESH", "GLE",
     "kinetic_energy", "temperature",
 ]
-
