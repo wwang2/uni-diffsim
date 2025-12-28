@@ -605,24 +605,26 @@ if __name__ == "__main__":
         "font.family": "monospace",
         "font.monospace": ["DejaVu Sans Mono", "Menlo", "Consolas", "Monaco"],
         "font.size": 11,
-        "axes.titlesize": 12,
+        "axes.titlesize": 13,
         "axes.labelsize": 11,
         "xtick.labelsize": 10,
         "ytick.labelsize": 10,
-        "legend.fontsize": 9,
+        "legend.fontsize": 10,
         "axes.grid": True,
-        "grid.alpha": 0.25,
-        "grid.linewidth": 0.7,
+        "grid.alpha": 0.3,
+        "grid.linewidth": 0.8,
         "axes.spines.top": False,
         "axes.spines.right": False,
-        "axes.titlepad": 8.0,
-        "axes.labelpad": 4.0,
+        "axes.titlepad": 10.0,
+        "axes.labelpad": 5.0,
         "xtick.direction": "out",
         "ytick.direction": "out",
         "legend.frameon": False,
+        "legend.framealpha": 0.9,
         "figure.facecolor": "white",
         "axes.facecolor": "white",
         "savefig.facecolor": "white",
+        "lines.linewidth": 1.5,
     })
     
     assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
@@ -647,9 +649,9 @@ if __name__ == "__main__":
     traj_od = integrator.run(x0, force_fn_1d, dt, n_steps, store_every=10)
     t = np.arange(traj_od.shape[0]) * dt * 10
     for i in range(min(3, n_batch)):
-        ax.plot(t, traj_od[:, i].detach().numpy(), alpha=0.7, lw=0.7)
-    ax.axhline(1, color='#d62728', ls='--', alpha=0.4, lw=1)
-    ax.axhline(-1, color='#d62728', ls='--', alpha=0.4, lw=1)
+        ax.plot(t, traj_od[:, i].detach().numpy(), alpha=0.75, lw=1.8)
+    ax.axhline(1, color='#d62728', ls='--', alpha=0.6, lw=1.5)
+    ax.axhline(-1, color='#d62728', ls='--', alpha=0.6, lw=1.5)
     ax.set_xlabel('Time')
     ax.set_ylabel('x')
     ax.set_title('Overdamped Langevin', fontweight='bold')
@@ -660,9 +662,9 @@ if __name__ == "__main__":
     integrator = BAOAB(gamma=1.0, kT=kT, mass=1.0)
     traj_baoab, _ = integrator.run(x0, None, force_fn_1d, dt, n_steps, store_every=10)
     for i in range(min(3, n_batch)):
-        ax.plot(t, traj_baoab[:, i].detach().numpy(), alpha=0.7, lw=0.7)
-    ax.axhline(1, color='#d62728', ls='--', alpha=0.4, lw=1)
-    ax.axhline(-1, color='#d62728', ls='--', alpha=0.4, lw=1)
+        ax.plot(t, traj_baoab[:, i].detach().numpy(), alpha=0.75, lw=1.8)
+    ax.axhline(1, color='#d62728', ls='--', alpha=0.6, lw=1.5)
+    ax.axhline(-1, color='#d62728', ls='--', alpha=0.6, lw=1.5)
     ax.set_xlabel('Time')
     ax.set_ylabel('x')
     ax.set_title('BAOAB', fontweight='bold')
@@ -673,9 +675,9 @@ if __name__ == "__main__":
     gle = GLE(kT=kT, mass=1.0, gamma=[0.5, 2.0], c=[0.3, 1.0])
     traj_gle, _ = gle.run(x0, None, force_fn_1d, dt, n_steps, store_every=10)
     for i in range(min(3, n_batch)):
-        ax.plot(t, traj_gle[:, i].detach().numpy(), alpha=0.7, lw=0.7)
-    ax.axhline(1, color='#d62728', ls='--', alpha=0.4, lw=1)
-    ax.axhline(-1, color='#d62728', ls='--', alpha=0.4, lw=1)
+        ax.plot(t, traj_gle[:, i].detach().numpy(), alpha=0.75, lw=1.8)
+    ax.axhline(1, color='#d62728', ls='--', alpha=0.6, lw=1.5)
+    ax.axhline(-1, color='#d62728', ls='--', alpha=0.6, lw=1.5)
     ax.set_xlabel('Time')
     ax.set_ylabel('x')
     ax.set_title('GLE (colored noise)', fontweight='bold')
@@ -691,14 +693,14 @@ if __name__ == "__main__":
     }
     colors = {'Overdamped': '#1f77b4', 'BAOAB': '#ff7f0e', 'GLE': '#2ca02c'}
     for name, s in samples.items():
-        ax.hist(s, bins=50, range=(-2.5, 2.5), density=True, alpha=0.4, 
-                label=name, color=colors[name])
+        ax.hist(s, bins=50, range=(-2.5, 2.5), density=True, alpha=0.5, 
+                label=name, color=colors[name], edgecolor='white', linewidth=0.5)
     
     x_th = torch.linspace(-2.5, 2.5, 200)
     u_th = dw.energy(x_th).detach().numpy()
     p_th = np.exp(-u_th / kT)
     p_th = p_th / (p_th.sum() * (x_th[1] - x_th[0]).item())
-    ax.plot(x_th.numpy(), p_th, 'k-', lw=2, label='Boltzmann')
+    ax.plot(x_th.numpy(), p_th, 'k-', lw=3, label='Boltzmann', zorder=10)
     ax.set_xlabel('x')
     ax.set_ylabel('Density')
     ax.set_title('Sampling Distribution', fontweight='bold')
@@ -748,19 +750,19 @@ if __name__ == "__main__":
     # Plot circles for reference
     theta = np.linspace(0, 2*np.pi, 100)
     for r in [1.0, 1.5, 2.0]:
-        ax.plot(r*np.cos(theta), r*np.sin(theta), 'k--', alpha=0.3, lw=0.8)
+        ax.plot(r*np.cos(theta), r*np.sin(theta), 'k--', alpha=0.4, lw=1.2)
     
     # For ESH, subsample based on weights (importance resampling)
     n_resample = 5000
     esh_idx = np.random.choice(len(esh_samples), size=n_resample, p=esh_w_flat)
     esh_resampled = esh_samples[esh_idx]
     
-    ax.scatter(esh_resampled[::5, 0], esh_resampled[::5, 1], s=1, alpha=0.3, 
-               c='#9467bd', label='ESH')
-    ax.scatter(nh_samples[::10, 0], nh_samples[::10, 1], s=1, alpha=0.3,
-               c='#2ca02c', label='NH')
-    ax.scatter(baoab_samples[::3, 0], baoab_samples[::3, 1], s=3, alpha=0.3,
-               c='#ff7f0e', label='BAOAB')
+    ax.scatter(esh_resampled[::5, 0], esh_resampled[::5, 1], s=8, alpha=0.4, 
+               c='#9467bd', label='ESH', edgecolors='none')
+    ax.scatter(nh_samples[::10, 0], nh_samples[::10, 1], s=8, alpha=0.4,
+               c='#2ca02c', label='NH', edgecolors='none')
+    ax.scatter(baoab_samples[::3, 0], baoab_samples[::3, 1], s=12, alpha=0.4,
+               c='#ff7f0e', label='BAOAB', edgecolors='none')
     
     ax.set_xlim(-3, 3)
     ax.set_ylim(-3, 3)
@@ -781,14 +783,17 @@ if __name__ == "__main__":
     
     # Histogram
     bins = np.linspace(0, 4, 40)
-    ax.hist(r_esh, bins=bins, density=True, alpha=0.4, color='#9467bd', label='ESH')
-    ax.hist(r_nh, bins=bins, density=True, alpha=0.4, color='#2ca02c', label='NH')
-    ax.hist(r_baoab, bins=bins, density=True, alpha=0.4, color='#ff7f0e', label='BAOAB')
+    ax.hist(r_esh, bins=bins, density=True, alpha=0.5, color='#9467bd', 
+            label='ESH', edgecolor='white', linewidth=0.5)
+    ax.hist(r_nh, bins=bins, density=True, alpha=0.5, color='#2ca02c', 
+            label='NH', edgecolor='white', linewidth=0.5)
+    ax.hist(r_baoab, bins=bins, density=True, alpha=0.5, color='#ff7f0e', 
+            label='BAOAB', edgecolor='white', linewidth=0.5)
     
     # Theoretical: p(r) = r * exp(-r²/2kT) / kT for 2D harmonic with k=1
     r_th = np.linspace(0, 4, 200)
     p_th = r_th * np.exp(-r_th**2 / (2 * kT_2d)) / kT_2d
-    ax.plot(r_th, p_th, 'k-', lw=2, label='Theory')
+    ax.plot(r_th, p_th, 'k-', lw=3, label='Theory', zorder=10)
     
     ax.set_xlabel('r = |x|')
     ax.set_ylabel('p(r)')
@@ -798,4 +803,87 @@ if __name__ == "__main__":
     
     plt.savefig(os.path.join(assets_dir, "integrators.png"), dpi=150, 
                 bbox_inches='tight', facecolor='white')
-    print(f"Saved integrators plot to assets/integrators.png")
+    import time
+    import tracemalloc
+
+    def benchmark_integrators():
+        print("\n" + "="*60)
+        print(f"{'Integrator':<20} | {'Time (s)':<10} | {'Steps/sec':<10} | {'Peak Mem (MB)':<12}")
+        print("-" * 60)
+        
+        # Benchmark setup
+        dim = 100
+        n_particles = 1000
+        n_steps = 1000
+        dt = 0.01
+        device = torch.device('cpu')
+        
+        # Simple Harmonic force for benchmarking
+        def force_fn(x):
+            return -x
+            
+        def grad_fn(x):
+            return x
+
+        x0 = torch.randn(n_particles, dim, device=device)
+        v0 = torch.randn(n_particles, dim, device=device)
+        
+        integrators = [
+            ("OverdampedLangevin", OverdampedLangevin(gamma=1.0, kT=1.0)),
+            ("BAOAB", BAOAB(gamma=1.0, kT=1.0, mass=1.0)),
+            ("VelocityVerlet", VelocityVerlet(mass=1.0)),
+            ("NoseHoover", NoseHoover(kT=1.0, mass=1.0, Q=1.0)),
+            ("NoseHooverChain", NoseHooverChain(kT=1.0, mass=1.0, Q=1.0, n_chain=2)),
+            ("ESH", ESH(eps=0.1)),
+            ("GLE", GLE(kT=1.0, mass=1.0, gamma=[1.0, 2.0], c=[1.0, 2.0]))
+        ]
+        
+        for name, integrator in integrators:
+            integrator = integrator.to(device)
+            
+            # Helper to run integrator with correct signature
+            def run_int(steps, use_warmup_slice=False):
+                current_x0 = x0[:10] if use_warmup_slice else x0
+                current_v0 = v0[:10] if use_warmup_slice else v0
+                
+                if name == "ESH":
+                    integrator.run(current_x0, None, grad_fn, n_steps=steps)
+                elif name == "OverdampedLangevin":
+                    integrator.run(current_x0, force_fn, dt=dt, n_steps=steps)
+                elif name == "VelocityVerlet":
+                    # VelocityVerlet requires explicit v0
+                    integrator.run(current_x0, current_v0, force_fn, dt=dt, n_steps=steps)
+                else:
+                    integrator.run(current_x0, None, force_fn, dt=dt, n_steps=steps)
+
+            # Warmup
+            try:
+                run_int(10, use_warmup_slice=True)
+            except Exception as e:
+                print(f"Failed warmup for {name}: {e}")
+                continue
+            
+            # Reset memory tracking
+            tracemalloc.start()
+            tracemalloc.clear_traces()
+            start_mem = tracemalloc.get_traced_memory()[0]
+            
+            start_time = time.perf_counter()
+            
+            # Run benchmark
+            run_int(n_steps, use_warmup_slice=False)
+                
+            end_time = time.perf_counter()
+            _, peak_mem = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+            
+            duration = end_time - start_time
+            # Metric: particles * steps / second
+            throughput = (n_steps * n_particles) / duration
+            mem_usage = (peak_mem - start_mem) / 1024 / 1024  # MB
+            
+            print(f"{name:<20} | {duration:<10.4f} | {throughput:<10.0f} | {mem_usage:<12.2f}")
+            
+        print("="*60 + "\n")
+
+    benchmark_integrators()
