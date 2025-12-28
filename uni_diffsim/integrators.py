@@ -53,12 +53,16 @@ class OverdampedLangevin(nn.Module):
         """Run trajectory. Returns (n_stored, ..., dim) positions."""
         x = x0
         n_stored = n_steps // store_every + 1
-        traj_list = [x0]
+        traj = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
+        traj[0] = x0
+        
+        idx = 1
         for i in range(1, n_steps + 1):
             x = self.step(x, force_fn, dt)
             if i % store_every == 0:
-                traj_list.append(x)
-        return torch.stack(traj_list, dim=0)
+                traj[idx] = x
+                idx += 1
+        return traj
 
 
 class BAOAB(nn.Module):
@@ -99,14 +103,22 @@ class BAOAB(nn.Module):
         """Run trajectory. Returns (positions, velocities) each (n_stored, ...)."""
         x = x0
         v = v0 if v0 is not None else torch.randn_like(x0) * torch.sqrt(self.kT / self.mass)
-        traj_x_list = [x0]
-        traj_v_list = [v]
+        
+        n_stored = n_steps // store_every + 1
+        traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
+        traj_v = torch.empty((n_stored, *v.shape), dtype=v.dtype, device=v.device)
+        
+        traj_x[0] = x0
+        traj_v[0] = v
+        
+        idx = 1
         for i in range(1, n_steps + 1):
             x, v = self.step(x, v, force_fn, dt)
             if i % store_every == 0:
-                traj_x_list.append(x)
-                traj_v_list.append(v)
-        return torch.stack(traj_x_list, dim=0), torch.stack(traj_v_list, dim=0)
+                traj_x[idx] = x
+                traj_v[idx] = v
+                idx += 1
+        return traj_x, traj_v
 
 
 class VelocityVerlet(nn.Module):
@@ -136,14 +148,21 @@ class VelocityVerlet(nn.Module):
             ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run trajectory. Returns (positions, velocities)."""
         x, v = x0, v0
-        traj_x_list = [x0]
-        traj_v_list = [v0]
+        n_stored = n_steps // store_every + 1
+        traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
+        traj_v = torch.empty((n_stored, *v0.shape), dtype=v0.dtype, device=v0.device)
+        
+        traj_x[0] = x0
+        traj_v[0] = v0
+        
+        idx = 1
         for i in range(1, n_steps + 1):
             x, v = self.step(x, v, force_fn, dt)
             if i % store_every == 0:
-                traj_x_list.append(x)
-                traj_v_list.append(v)
-        return torch.stack(traj_x_list, dim=0), torch.stack(traj_v_list, dim=0)
+                traj_x[idx] = x
+                traj_v[idx] = v
+                idx += 1
+        return traj_x, traj_v
 
 
 class NoseHoover(nn.Module):
@@ -215,14 +234,21 @@ class NoseHoover(nn.Module):
         v = v0 if v0 is not None else torch.randn_like(x0) * torch.sqrt(self.kT / self.mass)
         alpha = torch.zeros(x0.shape[:-1], device=x0.device, dtype=x0.dtype)
         
-        traj_x_list = [x0]
-        traj_v_list = [v]
+        n_stored = n_steps // store_every + 1
+        traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
+        traj_v = torch.empty((n_stored, *v.shape), dtype=v.dtype, device=v.device)
+        
+        traj_x[0] = x0
+        traj_v[0] = v
+        
+        idx = 1
         for i in range(1, n_steps + 1):
             x, v, alpha = self.step(x, v, alpha, force_fn, dt)
             if i % store_every == 0:
-                traj_x_list.append(x)
-                traj_v_list.append(v)
-        return torch.stack(traj_x_list, dim=0), torch.stack(traj_v_list, dim=0)
+                traj_x[idx] = x
+                traj_v[idx] = v
+                idx += 1
+        return traj_x, traj_v
 
 
 class NoseHooverChain(nn.Module):
@@ -311,14 +337,21 @@ class NoseHooverChain(nn.Module):
         xi_shape = x0.shape[:-1] + (self.n_chain,)
         xi = torch.zeros(xi_shape, device=x0.device, dtype=x0.dtype)
         
-        traj_x_list = [x0]
-        traj_v_list = [v]
+        n_stored = n_steps // store_every + 1
+        traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
+        traj_v = torch.empty((n_stored, *v.shape), dtype=v.dtype, device=v.device)
+        
+        traj_x[0] = x0
+        traj_v[0] = v
+        
+        idx = 1
         for i in range(1, n_steps + 1):
             x, v, xi = self.step(x, v, xi, force_fn, dt, ndof)
             if i % store_every == 0:
-                traj_x_list.append(x)
-                traj_v_list.append(v)
-        return torch.stack(traj_x_list, dim=0), torch.stack(traj_v_list, dim=0)
+                traj_x[idx] = x
+                traj_v[idx] = v
+                idx += 1
+        return traj_x, traj_v
 
 
 class ESH(nn.Module):
@@ -447,18 +480,25 @@ class ESH(nn.Module):
         
         r = torch.zeros(x0.shape[:-1], device=x0.device, dtype=x0.dtype)
         
-        traj_x_list = [x0]
-        traj_u_list = [u]
-        traj_r_list = [r]
+        n_stored = n_steps // store_every + 1
+        traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
+        traj_u = torch.empty((n_stored, *u.shape), dtype=u.dtype, device=u.device)
+        traj_r = torch.empty((n_stored, *r.shape), dtype=r.dtype, device=r.device)
         
+        traj_x[0] = x0
+        traj_u[0] = u
+        traj_r[0] = r
+        
+        idx = 1
         for i in range(1, n_steps + 1):
             x, u, r = self.step(x, u, r, grad_fn, eps)
             if i % store_every == 0:
-                traj_x_list.append(x)
-                traj_u_list.append(u)
-                traj_r_list.append(r)
+                traj_x[idx] = x
+                traj_u[idx] = u
+                traj_r[idx] = r
+                idx += 1
         
-        return torch.stack(traj_x_list, dim=0), torch.stack(traj_u_list, dim=0), torch.stack(traj_r_list, dim=0)
+        return traj_x, traj_u, traj_r
 
 
 class GLE(nn.Module):
@@ -570,16 +610,22 @@ class GLE(nn.Module):
         s_shape = x0.shape + (self.n_modes,)
         s = torch.randn(s_shape, device=device, dtype=dtype) * torch.sqrt(c * kT)
         
-        traj_x_list = [x0]
-        traj_v_list = [v]
+        n_stored = n_steps // store_every + 1
+        traj_x = torch.empty((n_stored, *x0.shape), dtype=dtype, device=device)
+        traj_v = torch.empty((n_stored, *v.shape), dtype=dtype, device=device)
         
+        traj_x[0] = x0
+        traj_v[0] = v
+        
+        idx = 1
         for i in range(1, n_steps + 1):
             x, v, s = self.step(x, v, s, force_fn, dt)
             if i % store_every == 0:
-                traj_x_list.append(x)
-                traj_v_list.append(v)
+                traj_x[idx] = x
+                traj_v[idx] = v
+                idx += 1
         
-        return torch.stack(traj_x_list, dim=0), torch.stack(traj_v_list, dim=0)
+        return traj_x, traj_v
 
 
 def kinetic_energy(v: torch.Tensor, mass: float = 1.0) -> torch.Tensor:
