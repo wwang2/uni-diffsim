@@ -676,7 +676,19 @@ if __name__ == "__main__":
     assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
     os.makedirs(assets_dir, exist_ok=True)
     
-    fig, axes = plt.subplots(2, 3, figsize=(12, 7), constrained_layout=True)
+    fig, axes = plt.subplots(3, 3, figsize=(12, 10), constrained_layout=True)
+    
+    # Common colormap and style
+    # Distinct colors for better separation
+    colors = {
+        'Overdamped': '#1f77b4',  # Blue
+        'BAOAB': '#ff7f0e',       # Orange
+        'GLE': '#2ca02c',         # Green
+        'NH': '#d62728',          # Red
+        'ESH': '#9467bd',         # Purple
+        'VelocityVerlet': '#8c564b', # Brown
+        'NoseHooverChain': '#e377c2' # Pink
+    }
     
     # Setup for 1D double well
     dw = DoubleWell()
@@ -695,9 +707,9 @@ if __name__ == "__main__":
     traj_od = integrator.run(x0, force_fn_1d, dt, n_steps, store_every=10)
     t = np.arange(traj_od.shape[0]) * dt * 10
     for i in range(min(3, n_batch)):
-        ax.plot(t, traj_od[:, i].detach().numpy(), alpha=0.75, lw=1.8)
-    ax.axhline(1, color='#d62728', ls='--', alpha=0.6, lw=1.5)
-    ax.axhline(-1, color='#d62728', ls='--', alpha=0.6, lw=1.5)
+        ax.plot(t, traj_od[:, i].detach().numpy(), alpha=0.75, lw=1.8, color=colors['Overdamped'])
+    ax.axhline(1, color='gray', ls='--', alpha=0.6, lw=1.5)
+    ax.axhline(-1, color='gray', ls='--', alpha=0.6, lw=1.5)
     ax.set_xlabel('Time')
     ax.set_ylabel('x')
     ax.set_title('Overdamped Langevin', fontweight='bold')
@@ -708,9 +720,9 @@ if __name__ == "__main__":
     integrator = BAOAB(gamma=1.0, kT=kT, mass=1.0)
     traj_baoab, _ = integrator.run(x0, None, force_fn_1d, dt, n_steps, store_every=10)
     for i in range(min(3, n_batch)):
-        ax.plot(t, traj_baoab[:, i].detach().numpy(), alpha=0.75, lw=1.8)
-    ax.axhline(1, color='#d62728', ls='--', alpha=0.6, lw=1.5)
-    ax.axhline(-1, color='#d62728', ls='--', alpha=0.6, lw=1.5)
+        ax.plot(t, traj_baoab[:, i].detach().numpy(), alpha=0.75, lw=1.8, color=colors['BAOAB'])
+    ax.axhline(1, color='gray', ls='--', alpha=0.6, lw=1.5)
+    ax.axhline(-1, color='gray', ls='--', alpha=0.6, lw=1.5)
     ax.set_xlabel('Time')
     ax.set_ylabel('x')
     ax.set_title('BAOAB', fontweight='bold')
@@ -721,9 +733,9 @@ if __name__ == "__main__":
     gle = GLE(kT=kT, mass=1.0, gamma=[0.5, 2.0], c=[0.3, 1.0])
     traj_gle, _ = gle.run(x0, None, force_fn_1d, dt, n_steps, store_every=10)
     for i in range(min(3, n_batch)):
-        ax.plot(t, traj_gle[:, i].detach().numpy(), alpha=0.75, lw=1.8)
-    ax.axhline(1, color='#d62728', ls='--', alpha=0.6, lw=1.5)
-    ax.axhline(-1, color='#d62728', ls='--', alpha=0.6, lw=1.5)
+        ax.plot(t, traj_gle[:, i].detach().numpy(), alpha=0.75, lw=1.8, color=colors['GLE'])
+    ax.axhline(1, color='gray', ls='--', alpha=0.6, lw=1.5)
+    ax.axhline(-1, color='gray', ls='--', alpha=0.6, lw=1.5)
     ax.set_xlabel('Time')
     ax.set_ylabel('x')
     ax.set_title('GLE (colored noise)', fontweight='bold')
@@ -737,7 +749,7 @@ if __name__ == "__main__":
         'BAOAB': traj_baoab[burn_in//10:].flatten().detach().numpy(),
         'GLE': traj_gle[burn_in//10:].flatten().detach().numpy(),
     }
-    colors = {'Overdamped': '#1f77b4', 'BAOAB': '#ff7f0e', 'GLE': '#2ca02c'}
+    # colors defined above
     for name, s in samples.items():
         ax.hist(s, bins=50, range=(-2.5, 2.5), density=True, alpha=0.5, 
                 label=name, color=colors[name], edgecolor='white', linewidth=0.5)
@@ -804,11 +816,11 @@ if __name__ == "__main__":
     esh_resampled = esh_samples[esh_idx]
     
     ax.scatter(esh_resampled[::5, 0], esh_resampled[::5, 1], s=8, alpha=0.4, 
-               c='#9467bd', label='ESH', edgecolors='none')
+               c=colors['ESH'], label='ESH', edgecolors='none')
     ax.scatter(nh_samples[::10, 0], nh_samples[::10, 1], s=8, alpha=0.4,
-               c='#2ca02c', label='NH', edgecolors='none')
+               c=colors['NH'], label='NH', edgecolors='none')
     ax.scatter(baoab_samples[::3, 0], baoab_samples[::3, 1], s=12, alpha=0.4,
-               c='#ff7f0e', label='BAOAB', edgecolors='none')
+               c=colors['BAOAB'], label='BAOAB', edgecolors='none')
     
     ax.set_xlim(-3, 3)
     ax.set_ylim(-3, 3)
@@ -829,11 +841,11 @@ if __name__ == "__main__":
     
     # Histogram
     bins = np.linspace(0, 4, 40)
-    ax.hist(r_esh, bins=bins, density=True, alpha=0.5, color='#9467bd', 
+    ax.hist(r_esh, bins=bins, density=True, alpha=0.5, color=colors['ESH'], 
             label='ESH', edgecolor='white', linewidth=0.5)
-    ax.hist(r_nh, bins=bins, density=True, alpha=0.5, color='#2ca02c', 
+    ax.hist(r_nh, bins=bins, density=True, alpha=0.5, color=colors['NH'], 
             label='NH', edgecolor='white', linewidth=0.5)
-    ax.hist(r_baoab, bins=bins, density=True, alpha=0.5, color='#ff7f0e', 
+    ax.hist(r_baoab, bins=bins, density=True, alpha=0.5, color=colors['BAOAB'], 
             label='BAOAB', edgecolor='white', linewidth=0.5)
     
     # Theoretical: p(r) = r * exp(-r²/2kT) / kT for 2D harmonic with k=1
@@ -846,6 +858,118 @@ if __name__ == "__main__":
     ax.set_title('Radial Distribution', fontweight='bold')
     ax.legend()
     ax.set_axisbelow(True)
+    
+    # 7. Benchmark Plot (Forward vs Backward)
+    ax = axes[2, 0]
+    # Spanning all columns in the bottom row
+    ax.remove()
+    ax = axes[2, 1]
+    ax.remove()
+    ax = axes[2, 2]
+    ax.remove()
+    
+    # Create a new axis spanning the bottom row
+    gs = axes[0, 0].get_gridspec()
+    ax_bench = fig.add_subplot(gs[2, :])
+    
+    def run_benchmark_for_plot():
+        # Setup for benchmark
+        dim = 64
+        n_particles = 256
+        n_steps = 100
+        dt = 0.01
+        device = torch.device('cpu')
+        
+        integrators_list = [
+            ("Overdamped", OverdampedLangevin(gamma=1.0, kT=1.0)),
+            ("BAOAB", BAOAB(gamma=1.0, kT=1.0, mass=1.0)),
+            ("Verlet", VelocityVerlet(mass=1.0)),
+            ("NH", NoseHoover(kT=1.0, mass=1.0, Q=1.0)),
+            ("NHC", NoseHooverChain(kT=1.0, mass=1.0, Q=1.0, n_chain=2)),
+            ("ESH", ESH(eps=0.1)),
+            ("GLE", GLE(kT=1.0, mass=1.0, gamma=[1.0, 2.0], c=[1.0, 2.0]))
+        ]
+        
+        fwd_times = []
+        bwd_times = []
+        names = []
+        
+        # Simple Harmonic force
+        def force_fn(x):
+            return -x
+        def grad_fn(x):
+            return x
+            
+        x0 = torch.randn(n_particles, dim, device=device, requires_grad=True)
+        v0 = torch.randn(n_particles, dim, device=device, requires_grad=True)
+        
+        import time
+        
+        for name, integrator in integrators_list:
+            integrator = integrator.to(device)
+            names.append(name)
+            
+            # Helper to run integrator
+            def run_int():
+                if name == "ESH":
+                    return integrator.run(x0, None, grad_fn, n_steps=n_steps)
+                elif name == "Overdamped":
+                    return integrator.run(x0, force_fn, dt=dt, n_steps=n_steps)
+                elif name == "Verlet":
+                    return integrator.run(x0, v0, force_fn, dt=dt, n_steps=n_steps)
+                else:
+                    return integrator.run(x0, None, force_fn, dt=dt, n_steps=n_steps)
+
+            # Warmup
+            try:
+                run_int()
+            except Exception:
+                pass
+                
+            # Forward
+            torch.cuda.synchronize() if device.type == 'cuda' else None
+            t0 = time.perf_counter()
+            out = run_int()
+            torch.cuda.synchronize() if device.type == 'cuda' else None
+            t_fwd = time.perf_counter() - t0
+            fwd_times.append(t_fwd)
+            
+            # Backward
+            if isinstance(out, tuple):
+                loss = out[0].sum()
+            else:
+                loss = out.sum()
+            
+            # Reset gradients
+            if x0.grad is not None: x0.grad.zero_()
+            if v0.grad is not None: v0.grad.zero_()
+            for p in integrator.parameters():
+                if p.grad is not None: p.grad.zero_()
+                
+            t0 = time.perf_counter()
+            loss.backward()
+            torch.cuda.synchronize() if device.type == 'cuda' else None
+            t_bwd = time.perf_counter() - t0
+            bwd_times.append(t_bwd)
+            
+        return names, fwd_times, bwd_times
+
+    names, fwd_times, bwd_times = run_benchmark_for_plot()
+    
+    # Bar plot
+    x = np.arange(len(names))
+    width = 0.35
+    
+    rects1 = ax_bench.bar(x - width/2, fwd_times, width, label='Forward (Execution)', color='#1f77b4', alpha=0.8)
+    rects2 = ax_bench.bar(x + width/2, bwd_times, width, label='Backward (Gradient)', color='#ff7f0e', alpha=0.8)
+    
+    ax_bench.set_ylabel('Time (s)')
+    ax_bench.set_title('Performance Benchmark (100 steps, batch=256, dim=64)', fontweight='bold')
+    ax_bench.set_xticks(x)
+    ax_bench.set_xticklabels(names)
+    ax_bench.legend()
+    ax_bench.set_axisbelow(True)
+    ax_bench.grid(axis='y', alpha=0.3)
     
     plt.savefig(os.path.join(assets_dir, "integrators.png"), dpi=150, 
                 bbox_inches='tight', facecolor='white')

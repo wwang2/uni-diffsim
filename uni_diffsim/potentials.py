@@ -249,21 +249,31 @@ if __name__ == "__main__":
     assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
     os.makedirs(assets_dir, exist_ok=True)
     
-    fig, axes = plt.subplots(2, 2, figsize=(10, 7), constrained_layout=True)
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8), constrained_layout=True)
     
-    # 1. Double well energy and force
+    # Common colormap and style
+    cmap = 'BuPu'
+    particle_color = '#88419d'  # Deep purple from BuPu palette
+    
+    # 1. Double Well 2D
     ax = axes[0, 0]
-    dw = DoubleWell()
-    x = torch.linspace(-2, 2, 200)
-    u = dw.energy(x)
-    f = dw.force(x.unsqueeze(-1)).squeeze()
-    ax.plot(x.numpy(), u.detach().numpy(), 'k-', lw=2, label='U(x)')
-    ax.plot(x.numpy(), f.detach().numpy(), '#d62728', ls='--', lw=1.5, label='F(x)')
-    ax.axhline(0, color='gray', lw=0.5)
+    dw = DoubleWell2D()
+    x = torch.linspace(-2.5, 2.5, 100)
+    y = torch.linspace(-2.0, 2.0, 100)
+    X, Y = torch.meshgrid(x, y, indexing='ij')
+    xy = torch.stack([X, Y], dim=-1)
+    U = dw.energy(xy)
+    
+    # Levels for DoubleWell2D
+    levels = np.linspace(0, 5, 21)
+    U_clipped = torch.clamp(U, max=5.0)
+    
+    cs = ax.contourf(X.numpy(), Y.numpy(), U_clipped.detach().numpy(), levels=levels, cmap=cmap, extend='max')
+    ax.contour(X.numpy(), Y.numpy(), U_clipped.detach().numpy(), levels=levels, colors='k', linewidths=0.3, alpha=0.5)
     ax.set_xlabel('x')
-    ax.set_ylabel('Energy / Force')
-    ax.set_title('Double Well', fontweight='bold')
-    ax.legend()
+    ax.set_ylabel('y')
+    ax.set_title('Double Well 2D', fontweight='bold')
+    plt.colorbar(cs, ax=ax, label='U')
     ax.set_axisbelow(True)
     
     # 2. Müller-Brown contour
@@ -274,9 +284,12 @@ if __name__ == "__main__":
     X, Y = torch.meshgrid(x, y, indexing='ij')
     xy = torch.stack([X, Y], dim=-1)
     U = mb.energy(xy)
-    levels = np.linspace(-150, 100, 30)
-    cs = ax.contourf(X.numpy(), Y.numpy(), U.detach().numpy(), levels=levels, cmap='BuGn')
-    ax.contour(X.numpy(), Y.numpy(), U.detach().numpy(), levels=levels, colors='k', linewidths=0.3)
+    
+    levels = np.linspace(-150, 100, 26)
+    U_clipped = torch.clamp(U, max=100.0)
+    
+    cs = ax.contourf(X.numpy(), Y.numpy(), U_clipped.detach().numpy(), levels=levels, cmap=cmap, extend='max')
+    ax.contour(X.numpy(), Y.numpy(), U_clipped.detach().numpy(), levels=levels, colors='k', linewidths=0.3, alpha=0.5)
     ax.set_xlabel('x')
     ax.set_ylabel('y')
     ax.set_title('Müller-Brown', fontweight='bold')
@@ -291,10 +304,11 @@ if __name__ == "__main__":
     positions = torch.zeros(7, 2)
     positions[1:, 0] = r * torch.cos(angles)
     positions[1:, 1] = r * torch.sin(angles)
+    
     ax.scatter(positions[:, 0].numpy(), positions[:, 1].numpy(), 
-               s=500, c='#1f77b4', edgecolor='k', lw=1.5)
-    ax.set_xlim(-2, 2)
-    ax.set_ylim(-2, 2)
+               s=500, c=particle_color, edgecolor='k', lw=1.5, zorder=10)
+    ax.set_xlim(-2.5, 2.5)
+    ax.set_ylim(-2.5, 2.5)
     ax.set_aspect('equal')
     ax.set_title(f'LJ-7 cluster (U={lj.energy(positions).item():.2f})', fontweight='bold')
     ax.set_xlabel('x')
@@ -328,11 +342,11 @@ if __name__ == "__main__":
                 continue  # skip the main box
             ghost_pos = pos_pbc + torch.tensor([dx, dy])
             ax.scatter(ghost_pos[:, 0].numpy(), ghost_pos[:, 1].numpy(),
-                      s=200, c='#1f77b4', alpha=0.2, edgecolor='none')
+                      s=200, c=particle_color, alpha=0.2, edgecolor='none', zorder=5)
     
     # Draw main particles
     ax.scatter(pos_pbc[:, 0].numpy(), pos_pbc[:, 1].numpy(),
-               s=400, c='#1f77b4', edgecolor='k', lw=1.5)
+               s=400, c=particle_color, edgecolor='k', lw=1.5, zorder=10)
     
     ax.set_xlim(-L*0.5, L*1.5)
     ax.set_ylim(-L*0.5, L*1.5)
