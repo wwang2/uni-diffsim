@@ -1,11 +1,9 @@
 
 # on unifying differentiable simulations
 
-> “All chaos is order misunderstood.”  
-> — Alexander Pope
+> “All chaos is order misunderstood.”    — Alexander Pope
 
-This repository explores questions I've wondered about for years:
-
+This project explores a question I've wondered about for years:
 
 > What does it mean to "differentiate through simulation"?
 
@@ -13,6 +11,23 @@ This repository explores questions I've wondered about for years:
 ```bash
 pip install -e ".[dev]"
 ```
+
+
+## Benchmark implemented simulators
+
+![Integrators](assets/integrators.png)
+
+
+| Integrator | Type | Notes |
+|------------|------|-------|
+| `OverdampedLangevin` | Stochastic | High friction |
+| `BAOAB` | Stochastic | NVT sampler |
+| `VelocityVerlet` | Deterministic | NVE, symplectic |
+| `NoseHooverChain` | Deterministic | NVT thermostat |
+| `ESH` | Deterministic | Ergodic, very finicky ([arXiv:2111.02434](https://arxiv.org/abs/2111.02434)) |
+| `GLE` | Stochastic | Colored noise |
+
+
 
 ## Potentials
 
@@ -25,18 +40,6 @@ pip install -e ".[dev]"
 | `LennardJones` | N×d | Clusters |
 | `Harmonic` | d | Reference |
 
-## Integrators
-
-![Integrators](assets/integrators.png)
-
-| Integrator | Type | Notes |
-|------------|------|-------|
-| `OverdampedLangevin` | Stochastic | High friction |
-| `BAOAB` | Stochastic | Best NVT sampler |
-| `VelocityVerlet` | Deterministic | NVE, symplectic |
-| `NoseHooverChain` | Deterministic | NVT thermostat |
-| `ESH` | Deterministic | Ergodic, no noise ([arXiv:2111.02434](https://arxiv.org/abs/2111.02434)) |
-| `GLE` | Stochastic | Colored noise |
 
 ## Usage
 
