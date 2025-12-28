@@ -57,6 +57,29 @@ class DoubleWell(Potential):
         return self.barrier_height * (x**2 - 1)**2
 
 
+class DoubleWell2D(Potential):
+    """2D Double well: U(x,y) = a*(x² - 1)² + b*y².
+    
+    Two minima at (±1, 0), connected by a saddle at (0, 0).
+    The y-direction is a simple harmonic potential.
+    
+    Input shape: (..., 2). Output shape: (...,).
+    
+    Args:
+        barrier_height: Height of the barrier in x-direction. Differentiable parameter.
+        k_y: Spring constant in y-direction. Differentiable parameter.
+    """
+    
+    def __init__(self, barrier_height: float = 1.0, k_y: float = 1.0):
+        super().__init__()
+        self.barrier_height = nn.Parameter(torch.tensor(barrier_height))
+        self.k_y = nn.Parameter(torch.tensor(k_y))
+    
+    def energy(self, xy: torch.Tensor) -> torch.Tensor:
+        x, y = xy[..., 0], xy[..., 1]
+        return self.barrier_height * (x**2 - 1)**2 + 0.5 * self.k_y * y**2
+
+
 class MullerBrown(Potential):
     """2D Müller-Brown potential - classic reaction path benchmark.
     

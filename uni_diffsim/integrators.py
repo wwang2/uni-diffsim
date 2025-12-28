@@ -146,11 +146,92 @@ class VelocityVerlet(nn.Module):
         return torch.stack(traj_x_list, dim=0), torch.stack(traj_v_list, dim=0)
 
 
+class NoseHoover(nn.Module):
+    """Single Nosé-Hoover thermostat for deterministic canonical sampling.
+    
+    Uses the Kleinerman 08 symmetric integration scheme. Simpler and more
+    robust than chain thermostats for many applications.
+    
+    Reference: Kleinerman et al., J. Chem. Phys. 128, 124109 (2008)
+    
+    Args:
+        kT: Thermal energy (target temperature). Differentiable parameter.
+        mass: Particle mass. Differentiable parameter.
+        Q: Thermostat mass (coupling strength). Larger Q = slower coupling.
+    """
+    
+    def __init__(self, kT: float = 1.0, mass: float = 1.0, Q: float = 1.0):
+        super().__init__()
+        self.kT = nn.Parameter(torch.tensor(kT))
+        self.mass = nn.Parameter(torch.tensor(mass))
+        self.Q = nn.Parameter(torch.tensor(Q))
+    
+    def step(self, x: torch.Tensor, v: torch.Tensor, alpha: torch.Tensor,
+             force_fn: ForceFunc, dt: float
+             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Single Nosé-Hoover step using Kleinerman 08 scheme.
+        
+        Args:
+            x: positions (..., dim)
+            v: velocities (..., dim)  
+            alpha: thermostat variable (...,)
+            force_fn: force function
+            dt: time step
+            
+        Returns:
+            (new_x, new_v, new_alpha)
+        """
+        # Number of degrees of freedom (per batch element)
+        ndof = x.shape[-1]
+        
+        # Compute v^2 (kinetic energy * 2 / mass)
+        v2 = (v**2).sum(dim=-1)
+        
+        # First thermostat half-step
+        alpha = alpha + (dt / 4) * (v2 / self.kT - ndof)
+        v = v * torch.exp(-alpha.unsqueeze(-1) * dt / 2)
+        v2 = (v**2).sum(dim=-1)
+        alpha = alpha + (dt / 4) * (v2 / self.kT - ndof)
+        
+        # Velocity-Verlet for physical degrees of freedom
+        v = v + (dt / 2) * force_fn(x) / self.mass
+        x = x + dt * v
+        v = v + (dt / 2) * force_fn(x) / self.mass
+        
+        # Second thermostat half-step
+        v2 = (v**2).sum(dim=-1)
+        alpha = alpha + (dt / 4) * (v2 / self.kT - ndof)
+        v = v * torch.exp(-alpha.unsqueeze(-1) * dt / 2)
+        v2 = (v**2).sum(dim=-1)
+        alpha = alpha + (dt / 4) * (v2 / self.kT - ndof)
+        
+        return x, v, alpha
+    
+    def run(self, x0: torch.Tensor, v0: torch.Tensor | None, force_fn: ForceFunc,
+            dt: float, n_steps: int, store_every: int = 1
+            ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run trajectory. Returns (positions, velocities)."""
+        x = x0
+        v = v0 if v0 is not None else torch.randn_like(x0) * torch.sqrt(self.kT / self.mass)
+        alpha = torch.zeros(x0.shape[:-1], device=x0.device, dtype=x0.dtype)
+        
+        traj_x_list = [x0]
+        traj_v_list = [v]
+        for i in range(1, n_steps + 1):
+            x, v, alpha = self.step(x, v, alpha, force_fn, dt)
+            if i % store_every == 0:
+                traj_x_list.append(x)
+                traj_v_list.append(v)
+        return torch.stack(traj_x_list, dim=0), torch.stack(traj_v_list, dim=0)
+
+
 class NoseHooverChain(nn.Module):
     """Nosé-Hoover chain thermostat for deterministic canonical sampling.
     
     Extends phase space with thermostat variables to sample NVT ensemble
     without stochastic noise. Chain length > 1 improves ergodicity.
+    
+    Note: For simple systems, NoseHoover (single thermostat) often works better.
     
     Args:
         kT: Thermal energy. Differentiable parameter.
@@ -517,7 +598,7 @@ if __name__ == "__main__":
     import os
     import numpy as np
     import matplotlib.pyplot as plt
-    from .potentials import DoubleWell, Harmonic
+    from .potentials import DoubleWell, DoubleWell2D, Harmonic
     
     # Plotting style
     plt.rcParams.update({
@@ -624,83 +705,94 @@ if __name__ == "__main__":
     ax.legend(loc='upper right')
     ax.set_axisbelow(True)
     
-    # 5. ESH ergodic sampling on 2D Harmonic
+    # 5. ESH, NH, BAOAB sampling on 2D Harmonic
     ax = axes[1, 1]
     harm_2d = Harmonic(k=1.0)
+    kT_2d = 1.0
     
     def grad_harm_2d(x):
         return -harm_2d.force(x)
     
-    # ESH samples ergodically along a single trajectory
-    esh = ESH(eps=0.2)
-    x0_2d = torch.tensor([[1.0, 0.0]])
-    u0_2d = torch.tensor([[0.0, 1.0]])
+    # ESH: use random initial velocities
+    # Note: ESH requires time-weighting by exp(r) for correct Boltzmann samples
+    torch.manual_seed(42)
+    esh = ESH(eps=0.1)
+    n_esh_chains = 20
+    x0_esh = torch.randn(n_esh_chains, 2)
+    u0_esh = torch.randn(n_esh_chains, 2)
+    u0_esh = u0_esh / u0_esh.norm(dim=-1, keepdim=True)
     
-    traj_esh_2d, _, _ = esh.run(x0_2d, u0_2d, grad_harm_2d, n_steps=10000, 
-                                 dt=0.2, store_every=1)
-    traj_np = traj_esh_2d.squeeze(1).detach().numpy()
+    traj_esh_2d, _, traj_r = esh.run(x0_esh, u0_esh, grad_harm_2d, n_steps=10000, 
+                                      dt=0.1, store_every=1)
+    # Get samples after burn-in and compute time weights
+    burn_in = 2000
+    esh_x = traj_esh_2d[burn_in:].detach().numpy()  # (n_steps, n_chains, 2)
+    esh_r = traj_r[burn_in:].detach().numpy()  # (n_steps, n_chains)
+    esh_weights = np.exp(esh_r)
+    esh_weights = esh_weights / esh_weights.sum()  # normalize globally
+    esh_samples = esh_x.reshape(-1, 2)
+    esh_w_flat = esh_weights.flatten()
     
-    # Compare with BAOAB
-    baoab_2d = BAOAB(gamma=1.0, kT=1.0, mass=1.0)
-    traj_baoab_2d, _ = baoab_2d.run(
-        torch.zeros(500, 2), None, harm_2d.force, dt=0.05, n_steps=2000, store_every=20
-    )
-    baoab_samples = traj_baoab_2d[-1].detach().numpy()
+    # Nosé-Hoover sampling
+    nh_2d = NoseHoover(kT=kT_2d, mass=1.0, Q=1.0)
+    x0_nh = torch.randn(20, 2)
+    traj_nh_2d, _ = nh_2d.run(x0_nh, None, harm_2d.force, dt=0.05, n_steps=10000, store_every=1)
+    nh_samples = traj_nh_2d[2000:].reshape(-1, 2).detach().numpy()
     
-    ax.scatter(traj_np[1000:, 0], traj_np[1000:, 1], s=1, alpha=0.3, 
-               c='#9467bd', label='ESH (ergodic)')
-    ax.scatter(baoab_samples[:, 0], baoab_samples[:, 1], s=15, alpha=0.5,
-               c='#ff7f0e', edgecolor='none', label='BAOAB')
+    # BAOAB sampling
+    baoab_2d = BAOAB(gamma=1.0, kT=kT_2d, mass=1.0)
+    x0_baoab = torch.randn(200, 2)
+    traj_baoab_2d, _ = baoab_2d.run(x0_baoab, None, harm_2d.force, dt=0.05, n_steps=2000, store_every=20)
+    baoab_samples = traj_baoab_2d[20:].reshape(-1, 2).detach().numpy()
     
+    # Plot circles for reference
     theta = np.linspace(0, 2*np.pi, 100)
     for r in [1.0, 1.5, 2.0]:
         ax.plot(r*np.cos(theta), r*np.sin(theta), 'k--', alpha=0.3, lw=0.8)
+    
+    # For ESH, subsample based on weights (importance resampling)
+    n_resample = 5000
+    esh_idx = np.random.choice(len(esh_samples), size=n_resample, p=esh_w_flat)
+    esh_resampled = esh_samples[esh_idx]
+    
+    ax.scatter(esh_resampled[::5, 0], esh_resampled[::5, 1], s=1, alpha=0.3, 
+               c='#9467bd', label='ESH')
+    ax.scatter(nh_samples[::10, 0], nh_samples[::10, 1], s=1, alpha=0.3,
+               c='#2ca02c', label='NH')
+    ax.scatter(baoab_samples[::3, 0], baoab_samples[::3, 1], s=3, alpha=0.3,
+               c='#ff7f0e', label='BAOAB')
     
     ax.set_xlim(-3, 3)
     ax.set_ylim(-3, 3)
     ax.set_aspect('equal')
     ax.set_xlabel('x')
     ax.set_ylabel('y')
-    ax.set_title('ESH vs BAOAB (2D Harmonic)', fontweight='bold')
+    ax.set_title('2D Harmonic Sampling', fontweight='bold')
     ax.legend(loc='upper right', markerscale=3)
     ax.set_axisbelow(True)
     
-    # 6. Energy conservation comparison
+    # 6. Radial distribution comparison (using time-weighted ESH)
     ax = axes[1, 2]
-    harm = Harmonic(k=1.0)
-    def harm_force(x):
-        return harm.force(x)
-    def harm_grad(x):
-        return -harm_force(x)
     
-    x0_h = torch.tensor([[1.0, 0.0]])
-    v0_h = torch.tensor([[0.0, 1.0]])
-    dt_fine = 0.05
-    n_energy = 1000
+    # Compute radial distances
+    r_esh = np.sqrt(esh_resampled[:, 0]**2 + esh_resampled[:, 1]**2)
+    r_nh = np.sqrt(nh_samples[:, 0]**2 + nh_samples[:, 1]**2)
+    r_baoab = np.sqrt(baoab_samples[:, 0]**2 + baoab_samples[:, 1]**2)
     
-    # Verlet
-    verlet = VelocityVerlet(mass=1.0)
-    tx_v, tv_v = verlet.run(x0_h, v0_h, harm_force, dt_fine, n_energy)
-    E_verlet = harm.energy(tx_v.squeeze(1)) + kinetic_energy(tv_v.squeeze(1))
+    # Histogram
+    bins = np.linspace(0, 4, 40)
+    ax.hist(r_esh, bins=bins, density=True, alpha=0.4, color='#9467bd', label='ESH')
+    ax.hist(r_nh, bins=bins, density=True, alpha=0.4, color='#2ca02c', label='NH')
+    ax.hist(r_baoab, bins=bins, density=True, alpha=0.4, color='#ff7f0e', label='BAOAB')
     
-    # ESH (conserves modified Hamiltonian)
-    esh_h = ESH(eps=dt_fine)
-    tx_e, tu_e, tr_e = esh_h.run(x0_h, None, harm_grad, n_energy, dt=dt_fine)
-    # ESH Hamiltonian: H = E(x) + d/2 * log(|v|²/d) = E(x) + r + const
-    E_esh = harm.energy(tx_e.squeeze(1)) + tr_e.squeeze(1)
+    # Theoretical: p(r) = r * exp(-r²/2kT) / kT for 2D harmonic with k=1
+    r_th = np.linspace(0, 4, 200)
+    p_th = r_th * np.exp(-r_th**2 / (2 * kT_2d)) / kT_2d
+    ax.plot(r_th, p_th, 'k-', lw=2, label='Theory')
     
-    # NHC
-    nhc = NoseHooverChain(kT=0.5, mass=1.0, Q=1.0)
-    tx_n, tv_n = nhc.run(x0_h, v0_h, harm_force, dt_fine, n_energy)
-    E_nhc = harm.energy(tx_n.squeeze(1)) + kinetic_energy(tv_n.squeeze(1))
-    
-    t_e = np.arange(n_energy + 1) * dt_fine
-    ax.plot(t_e, E_verlet.detach().numpy(), label='Verlet', lw=1.2)
-    ax.plot(t_e, E_esh.detach().numpy(), label='ESH (H_ESH)', lw=1.2, alpha=0.8)
-    ax.plot(t_e, E_nhc.detach().numpy(), label='NHC', lw=1.2, alpha=0.8)
-    ax.set_xlabel('Time')
-    ax.set_ylabel('Hamiltonian')
-    ax.set_title('Energy Conservation', fontweight='bold')
+    ax.set_xlabel('r = |x|')
+    ax.set_ylabel('p(r)')
+    ax.set_title('Radial Distribution', fontweight='bold')
     ax.legend()
     ax.set_axisbelow(True)
     

@@ -4,7 +4,7 @@ import pytest
 import torch
 import math
 from uni_diffsim.integrators import (
-    OverdampedLangevin, BAOAB, VelocityVerlet, NoseHooverChain, ESH, GLE,
+    OverdampedLangevin, BAOAB, VelocityVerlet, NoseHoover, NoseHooverChain, ESH, GLE,
     kinetic_energy, temperature,
 )
 from uni_diffsim.potentials import DoubleWell, Harmonic, MullerBrown
@@ -141,6 +141,48 @@ class TestVelocityVerlet:
         area_final = abs(dx1 * dv2 - dx2 * dv1)
         area_initial = eps * eps
         assert abs(area_final - area_initial) / area_initial < 0.05
+
+
+class TestNoseHoover:
+    """Tests for single Nosé-Hoover thermostat."""
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_step_shape(self, device):
+        """Step should preserve shape."""
+        integrator = NoseHoover(kT=1.0, mass=1.0, Q=1.0)
+        x = torch.randn(10, 3, device=device)
+        v = torch.randn(10, 3, device=device)
+        alpha = torch.zeros(10, device=device)
+        force_fn = lambda x: -x
+        x_new, v_new, alpha_new = integrator.step(x, v, alpha, force_fn, dt=0.01)
+        assert x_new.shape == x.shape
+        assert v_new.shape == v.shape
+        assert alpha_new.shape == alpha.shape
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_run_shape(self, device):
+        """Run should return correct trajectory shape."""
+        integrator = NoseHoover(kT=1.0)
+        x0 = torch.randn(10, 3, device=device)
+        force_fn = lambda x: -x
+        traj_x, traj_v = integrator.run(x0, None, force_fn, dt=0.01, n_steps=100)
+        assert traj_x.shape == (101, 10, 3)
+        assert traj_v.shape == (101, 10, 3)
+    
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_temperature_equilibration(self, device):
+        """Temperature should equilibrate to target kT."""
+        torch.manual_seed(42)
+        target_kT = 1.0
+        integrator = NoseHoover(kT=target_kT, mass=1.0, Q=1.0)
+        x0 = torch.zeros(100, 2, device=device)
+        v0 = torch.randn(100, 2, device=device) * 0.5
+        harm = Harmonic(k=1.0).to(device)
+        traj_x, traj_v = integrator.run(x0, v0, harm.force, dt=0.01, n_steps=5000)
+        # Check temperature in second half of trajectory
+        T_samples = temperature(traj_v[2500:], mass=1.0)
+        T_mean = T_samples.mean()
+        assert 0.5 * target_kT < T_mean < 1.5 * target_kT
 
 
 class TestNoseHooverChain:
@@ -348,6 +390,21 @@ class TestVectorization:
             assert v_new.shape == shape
     
     @pytest.mark.parametrize("device", DEVICES)
+    def test_nh_batch(self, device):
+        """NoseHoover should handle batch dimensions."""
+        integrator = NoseHoover(kT=1.0, mass=1.0, Q=1.0)
+        force_fn = lambda x: -x
+        for batch_shape, dim in [((10,), 3), ((5, 10), 3), ((2, 3, 4), 2)]:
+            shape = batch_shape + (dim,)
+            x = torch.randn(shape, device=device)
+            v = torch.randn(shape, device=device)
+            alpha = torch.zeros(batch_shape, device=device)
+            x_new, v_new, alpha_new = integrator.step(x, v, alpha, force_fn, dt=0.01)
+            assert x_new.shape == shape
+            assert v_new.shape == shape
+            assert alpha_new.shape == batch_shape
+    
+    @pytest.mark.parametrize("device", DEVICES)
     def test_nhc_batch(self, device):
         """NoseHooverChain should handle batch dimensions."""
         integrator = NoseHooverChain(kT=1.0, mass=1.0, Q=1.0, n_chain=2)
@@ -509,17 +566,17 @@ class TestDifferentiability:
         assert torch.isfinite(k.grad)
     
     @pytest.mark.parametrize("device", DEVICES)
-    def test_nhc_differentiable(self, device):
-        """NoseHooverChain should be differentiable."""
-        nhc = NoseHooverChain(kT=0.5, mass=1.0, Q=1.0, n_chain=2)
+    def test_nh_differentiable(self, device):
+        """NoseHoover should be differentiable."""
+        nh = NoseHoover(kT=0.5, mass=1.0, Q=1.0)
         k = torch.tensor([1.0], device=device, requires_grad=True)
         x = torch.tensor([[1.0, 0.0]], device=device)
         v = torch.tensor([[0.0, 1.0]], device=device)
-        xi = torch.zeros(1, 2, device=device)
+        alpha = torch.zeros(1, device=device)
         def force_fn(x):
             return -k * x
         for _ in range(10):
-            x, v, xi = nhc.step(x, v, xi, force_fn, dt=0.01, ndof=2)
+            x, v, alpha = nh.step(x, v, alpha, force_fn, dt=0.01)
         loss = x.pow(2).sum()
         loss.backward()
         assert k.grad is not None
