@@ -765,7 +765,7 @@ if __name__ == "__main__":
     torch.manual_seed(42)
     np.random.seed(42)
 
-    fig, axes = plt.subplots(3, 2, figsize=(13, 15), constrained_layout=True)
+    fig, axes = plt.subplots(3, 3, figsize=(16, 14), constrained_layout=True)
 
     # Beautiful color palette (Nord-inspired + vibrant accents)
     colors = {
@@ -1088,7 +1088,7 @@ if __name__ == "__main__":
     # =========================================================================
     # Panel 6: Gradient stability with trajectory length
     # =========================================================================
-    ax = axes[2, 1]
+    ax = axes[2, 0]
     print("\n[6] Gradient stability vs trajectory length...")
 
     kT_stab = 1.0
@@ -1211,6 +1211,55 @@ if __name__ == "__main__":
 
         reinforce_times.append(reinforce_time)
         reinforce_memory.append(mem_rf)
+
+    # =========================================================================
+    # Panel 7: Time Benchmark (BPTT vs REINFORCE)
+    # =========================================================================
+    ax = axes[2, 1]
+    print("\n[7] Computational time comparison...")
+
+    ax.plot(benchmark_traj_lengths, bptt_times, 'o-', color=colors['bptt'], lw=LW, ms=MS,
+            label='BPTT', alpha=0.9)
+    ax.plot(benchmark_traj_lengths, reinforce_times, '^-', color=colors['reinforce'], lw=LW, ms=MS,
+            label='REINFORCE', alpha=0.9)
+    ax.set_xlabel('Trajectory length (steps)')
+    ax.set_ylabel('Execution time (seconds)')
+    ax.set_title('Computational Time Benchmark', fontweight='bold')
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_axisbelow(True)
+
+    # Add speedup annotation
+    speedup_5000 = bptt_times[-1] / reinforce_times[-1] if reinforce_times[-1] > 0 else 0
+    ax.text(0.98, 0.05, f'Speedup @ 5000: {speedup_5000:.0f}x',
+            transform=ax.transAxes, fontsize=10, ha='right', va='bottom',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+    # =========================================================================
+    # Panel 8: Memory Benchmark (BPTT vs REINFORCE)
+    # =========================================================================
+    ax = axes[2, 2]
+    print("\n[8] Memory usage comparison...")
+
+    ax.plot(benchmark_traj_lengths, bptt_memory, 'o-', color=colors['bptt'], lw=LW, ms=MS,
+            label='BPTT', alpha=0.9)
+    ax.plot(benchmark_traj_lengths, reinforce_memory, '^-', color=colors['reinforce'], lw=LW, ms=MS,
+            label='REINFORCE', alpha=0.9)
+    ax.set_xlabel('Trajectory length (steps)')
+    ax.set_ylabel('Peak memory (MB)')
+    ax.set_title('Memory Usage Benchmark', fontweight='bold')
+    ax.set_xscale('log')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_axisbelow(True)
+
+    # Add memory ratio annotation
+    mem_ratio_5000 = bptt_memory[-1] / reinforce_memory[-1] if reinforce_memory[-1] > 0 else 0
+    ax.text(0.98, 0.95, f'Ratio @ 5000: {mem_ratio_5000:.1f}x',
+            transform=ax.transAxes, fontsize=10, ha='right', va='top',
+            bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
 
     # Print benchmark results
     print("\n[Benchmark Results]")
