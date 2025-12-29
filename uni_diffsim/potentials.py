@@ -16,9 +16,11 @@ class Potential(nn.Module):
     
     def force(self, x: torch.Tensor) -> torch.Tensor:
         """Compute force = -grad(U). Works for any batch shape."""
-        x = x.detach().requires_grad_(True)
-        u = self.energy(x)
-        grad = torch.autograd.grad(u.sum(), x, create_graph=True)[0]
+        with torch.enable_grad():
+            if not x.requires_grad:
+                x = x.detach().requires_grad_(True)
+            u = self.energy(x)
+            grad = torch.autograd.grad(u.sum(), x, create_graph=True)[0]
         return -grad
     
     def hessian(self, x: torch.Tensor) -> torch.Tensor:
