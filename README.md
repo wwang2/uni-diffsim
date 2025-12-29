@@ -44,28 +44,28 @@ pip install -e ".[dev]"
 
 ## Gradient Estimators
 
-![Gradient Estimators](assets/gradient_estimators.png)
+![Gradient Methods Comparison](assets/gradient_methods_comparison.png)
 
-Two approaches for computing gradients of equilibrium observables with respect to potential parameters:
+Three approaches for computing gradients through stochastic simulations:
 
-| Estimator | Method | Pros | Cons |
-|-----------|--------|------|------|
-| **BPTT** | Backprop through trajectory | Exact for finite horizon | Exploding gradients, memory-intensive |
-| **REINFORCE** | Score function / TPT | Stable, O(1) memory | Higher variance, needs equilibrium samples |
+| Method | Memory | Equilibrium | Non-Equilibrium | Notes |
+|--------|--------|-------------|-----------------|-------|
+| **BPTT** | O(T) | ✓ | ✓ | Universal, backprop through trajectory |
+| **REINFORCE** | O(1) | ✓ | ✗ | Score function / TPT, equilibrium only |
+| **Implicit** | O(1) | ✓ | ✗ | Implicit differentiation, equilibrium only |
 
 The REINFORCE estimator uses the thermodynamic perturbation theory identity:
 ```
 ∇_θ ⟨O⟩ = -β Cov(O, ∇_θU) = -β [⟨O ∇_θU⟩ - ⟨O⟩⟨∇_θU⟩]
 ```
 
-**Key findings on Asymmetric Double-Well** (see plot above):
-1. **Well occupation gradient**: REINFORCE accurately estimates ∂P_right/∂b while BPTT underestimates by ~4x
-2. **Optimization**: REINFORCE converges to optimal asymmetry (b→0) for equal well occupation; BPTT stalls
-3. **Stability**: BPTT gradients become biased (~2x) at long trajectories; REINFORCE remains stable
-4. **Harmonic validation**: Both methods agree with theory `d⟨x²⟩/dk = -kT/k²`
+**Key findings** (see plot above):
+- **Equilibrium systems** (Harmonic, Double Well, Asymmetric DW): All three methods agree
+- **Non-equilibrium systems** (First Passage Time, Transition Probability, Optimal Control): Only BPTT provides valid gradients; REINFORCE and Implicit fail (marked with ✗)
+- **Trade-off**: BPTT is universal but memory-intensive; REINFORCE/Implicit are O(1) memory but restricted to equilibrium observables
 
 ```bash
-python -m uni_diffsim.gradient_estimators  # Generate the plot
+python scripts/gradient_methods_comparison.py  # Generate the comparison plot
 ```
 
 
