@@ -10,6 +10,7 @@ from .gradient_estimators import (
     ReinforceEstimator, GirsanovEstimator, ReweightingLoss,
     ImplicitDiffEstimator,
     reinforce_gradient,
+    CheckpointManager, CheckpointedNoseHoover, ContinuousAdjointNoseHoover,
 )
 
 __version__ = "0.1.0"
@@ -25,4 +26,6 @@ __all__ = [
     "ReinforceEstimator", "GirsanovEstimator", "ReweightingLoss",
     "ImplicitDiffEstimator",
     "reinforce_gradient",
+    # Adjoint Methods
+    "CheckpointManager", "CheckpointedNoseHoover", "ContinuousAdjointNoseHoover",
 ]
