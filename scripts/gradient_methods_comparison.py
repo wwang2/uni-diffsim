@@ -727,6 +727,9 @@ def run_optimal_control():
     """
     Experiment 6: Optimal Control (Non-Equilibrium)
     
+    Steer particles from left well (-1) to right well (+1) in a double well potential.
+    The controller learns a time-dependent force to overcome the barrier efficiently.
+    
     This is PURE BPTT - REINFORCE and Implicit don't apply!
     """
     print("\n[6/6] Optimal Control: Learn steering protocol [Non-Eq]")
@@ -751,6 +754,10 @@ def run_optimal_control():
         'Implicit': {'grads_mean': [], 'grads_std': [], 'valid': False, 'loss_history': [], 'success': []},
     }
     
+    # Use library components instead of manual implementation
+    potential = DoubleWell(barrier_height=1.0)
+    integrator = OverdampedLangevin(gamma=gamma, kT=kT)
+    
     # BPTT: Train neural controller
     controller = NeuralController(hidden_dim=32)
     optimizer = torch.optim.Adam(controller.parameters(), lr=0.01)
@@ -762,13 +769,23 @@ def run_optimal_control():
         x = torch.full((n_walkers, 1), x_start)
         total_work = 0.0
         
-        for step in range(n_steps):
-            t = step * dt
+        for step_idx in range(n_steps):
+            t = step_idx * dt
+            
+            # Compute control force at current position
             control_force = controller(x, t, T)
+            
+            # Work done by control force
             work_increment = (control_force**2).mean() * dt / gamma
             total_work = total_work + work_increment
-            noise = torch.randn_like(x)
-            x = x + (control_force / gamma) * dt + np.sqrt(2 * kT * dt / gamma) * noise
+            
+            # Combined force: base potential + control
+            # Use closure with default arg to capture current control_force
+            def combined_force(x_in, ctrl=control_force):
+                return potential.force(x_in) + ctrl
+            
+            # Use integrator step
+            x = integrator.step(x, combined_force, dt)
         
         distance_loss = ((x - x_target)**2).mean()
         loss = distance_loss + work_penalty * total_work
@@ -783,18 +800,20 @@ def run_optimal_control():
         results['BPTT']['grads_mean'].append(success_rate)  # Use success as "gradient proxy"
         results['BPTT']['grads_std'].append(0.0)
     
-    # REINFORCE/Implicit: Random walk baseline
+    # REINFORCE/Implicit: Uncontrolled baseline (only potential force, no control)
+    # Shows what happens without learned control - particles stay trapped in left well
     for method in ['REINFORCE', 'Implicit']:
         for epoch in range(n_epochs):
             torch.manual_seed(epoch)
             x = torch.full((n_walkers, 1), x_start)
             
-            for step in range(n_steps):
-                noise = torch.randn_like(x)
-                x = x + np.sqrt(2 * kT * dt / gamma) * noise
+            # Run uncontrolled dynamics using integrator.run()
+            with torch.no_grad():
+                traj = integrator.run(x, potential.force, dt=dt, n_steps=n_steps)
+            x_final = traj[-1]
             
-            distance_loss = ((x - x_target)**2).mean().item()
-            success_rate = (x[:, 0] > 0.5).float().mean().item()
+            distance_loss = ((x_final - x_target)**2).mean().item()
+            success_rate = (x_final[:, 0] > 0.5).float().mean().item()
             
             results[method]['loss_history'].append(distance_loss)
             results[method]['success'].append(success_rate)
@@ -802,6 +821,7 @@ def run_optimal_control():
             results[method]['grads_std'].append(0.0)
     
     print(f"   BPTT final success rate: {results['BPTT']['success'][-1]:.1%}")
+    print(f"   Uncontrolled baseline:   {results['REINFORCE']['success'][-1]:.1%}")
     return results
 
 
