@@ -1,0 +1,85 @@
+---
+description: Info-dense writing style for web demos/articles (editorial, reproducible, non-hype)
+globs:
+  - "**/*.{md,mdx}"
+  - "**/app/**"
+  - "**/pages/**"
+  - "**/src/**"
+  - "**/content/**"
+  - "**/posts/**"
+  - "**/blog/**"
+alwaysApply: false
+---
+You are writing web demo/article content that maximizes information density and reproducibility.
+Target vibe: calm editorial technical writing (e.g. `https://diffuse.one/p/m1-000`, `https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/`).
+
+HARD TONE RULES (NO SLOP)
+- No hype, no marketing, no “game-changing / revolutionary / unlock”.
+- No filler openers. Start with the claim + context in ≤ 3 sentences.
+- No hedging chains (“might / could / perhaps”) unless uncertainty is the point; if uncertain, state what is unknown and why.
+- Prefer concrete nouns and verbs; minimize adjectives.
+
+DOCUMENT SHAPE (DEFAULT TEMPLATE)
+- Title: specific, technical, outcome-oriented.
+- Opening (≤ 120 words): what problem, what you did, what changed (numbers if possible).
+- Then use these sections (omit any with no content):
+  - ## Goal
+  - ## Result (include metrics / screenshots / qualitative deltas)
+  - ## Key idea
+  - ## Method (only the non-obvious steps)
+  - ## Implementation notes (pitfalls, footguns, edge cases)
+  - ## Reproduce (commands, env, versions, seeds)
+  - ## Limitations / Failure modes
+  - ## References
+
+PARAGRAPH + SENTENCE RULES
+- One idea per paragraph.
+- Lead each paragraph with the conclusion, then the evidence.
+- Prefer short sentences; allow long sentences only when packing definitions or constraints.
+- Replace “This shows that…” with the statement itself.
+
+NUMBERS, CLAIMS, AND EVIDENCE
+- Every meaningful claim should be backed by one of:
+  - a number, or
+  - a minimal example, or
+  - a comparison table, or
+  - a diagram, or
+  - a code snippet you can run.
+- If you cannot back it, downgrade it to a hypothesis and state what test would validate it.
+
+STRUCTURE OVER PROSE
+- Prefer:
+  - bullet lists with bolded lead-ins,
+  - small tables,
+  - tight diagrams,
+  - short code blocks.
+- Avoid long narrative. If a section exceeds ~200–300 words, split it.
+
+CODE & COMMANDS (COPY-PASTE QUALITY)
+- Every code block must be runnable or directly reusable; include imports and context.
+- Every command block must specify working directory assumptions and key env vars.
+- When behavior depends on randomness, specify seeds and determinism settings explicitly.
+
+DEMO/INTERACTIVE CONTENT RULES (FOR WEB PAGES)
+- State the default settings and what they demonstrate.
+- Label every control with:
+  - what it changes,
+  - expected direction of effect,
+  - and any constraints (range, units).
+- For every plot/table: include a caption that states the takeaway, not the axes.
+- Prefer “comparison mode”: baseline vs new, side-by-side, with the delta called out.
+
+ERRORS, EDGE CASES, AND SAFETY
+- List known failure modes early (Implementation notes / Limitations).
+- When something is brittle, say what breaks it and how to detect it.
+- Never hide errors behind vague text; show the error message (trim to the relevant lines).
+
+LINKING & REFERENCES
+- Link to primary sources and exact versions (commit, tag, paper).
+- When citing a source, explain the one detail you used from it (not a summary of the whole thing).
+
+FINAL PASS CHECKLIST (BEFORE YOU STOP)
+- Can a reader reproduce the core result in < 10 minutes?
+- Are all claims supported with evidence?
+- Did you remove all throat-clearing and hype?
+- Is the “why it matters” implicit in the result, not stated as marketing?

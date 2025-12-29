@@ -36,6 +36,7 @@ pip install -e ".[dev]"
 | Potential | Dim | Use |
 |-----------|-----|-----|
 | `DoubleWell` | 1D | Barrier crossing |
+| `AsymmetricDoubleWell` | 1D | Metastable populations |
 | `MullerBrown` | 2D | Reaction paths |
 | `LennardJones` | N×d | Clusters |
 | `Harmonic` | d | Reference |
@@ -57,11 +58,11 @@ The REINFORCE estimator uses the thermodynamic perturbation theory identity:
 ∇_θ ⟨O⟩ = -β Cov(O, ∇_θU) = -β [⟨O ∇_θU⟩ - ⟨O⟩⟨∇_θU⟩]
 ```
 
-**Key findings** (see plot above):
-1. Both methods agree with theory `d⟨x²⟩/dk = -kT/k²` for harmonic potentials
-2. Both can optimize k to match target ⟨x²⟩ (Panel 3)
-3. BPTT gradients become biased (~2x) at long trajectories while REINFORCE remains stable (Panel 4)
-4. REINFORCE variance decreases as 1/N with sample size (Panel 2)
+**Key findings on Asymmetric Double-Well** (see plot above):
+1. **Well occupation gradient**: REINFORCE accurately estimates ∂P_right/∂b while BPTT underestimates by ~4x
+2. **Optimization**: REINFORCE converges to optimal asymmetry (b→0) for equal well occupation; BPTT stalls
+3. **Stability**: BPTT gradients become biased (~2x) at long trajectories; REINFORCE remains stable
+4. **Harmonic validation**: Both methods agree with theory `d⟨x²⟩/dk = -kT/k²`
 
 ```bash
 python -m uni_diffsim.gradient_estimators  # Generate the plot

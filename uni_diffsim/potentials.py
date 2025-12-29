@@ -57,6 +57,53 @@ class DoubleWell(Potential):
         return self.barrier_height * (x**2 - 1)**2
 
 
+class AsymmetricDoubleWell(Potential):
+    """1D Asymmetric double well: U(x) = a*(x² - 1)² + b*x.
+
+    A tilted double-well potential where:
+    - a controls the barrier height
+    - b controls the asymmetry (tilt)
+
+    When b > 0, the left well (x ≈ -1) is lower.
+    When b < 0, the right well (x ≈ +1) is lower.
+
+    This potential is interesting for studying:
+    - Population ratios between metastable states
+    - Transition rates and their parameter dependence
+    - Gradient of occupation probabilities w.r.t. asymmetry
+
+    At equilibrium, the ratio of populations follows:
+        P_right / P_left ≈ exp(-β * 2b)  (for small b, high barrier)
+
+    Input shape: (...,) or (..., 1). Output shape: (...,).
+
+    Args:
+        barrier_height: Height of the barrier (parameter a). Differentiable.
+        asymmetry: Tilt of the potential (parameter b). Differentiable.
+    """
+
+    def __init__(self, barrier_height: float = 1.0, asymmetry: float = 0.0):
+        super().__init__()
+        self.barrier_height = nn.Parameter(torch.tensor(barrier_height))
+        self.asymmetry = nn.Parameter(torch.tensor(asymmetry))
+
+    def energy(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[-1:] == (1,):
+            x = x.squeeze(-1)
+        return self.barrier_height * (x**2 - 1)**2 + self.asymmetry * x
+
+    def well_depths(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return approximate energy of left and right wells.
+
+        For small asymmetry, wells are near x = ±1.
+        Returns (U_left, U_right).
+        """
+        # Approximate well positions (exact for b=0)
+        x_left = torch.tensor(-1.0)
+        x_right = torch.tensor(1.0)
+        return self.energy(x_left), self.energy(x_right)
+
+
 class DoubleWell2D(Potential):
     """2D Double well: U(x,y) = a*(x² - 1)² + b*y².
     

@@ -1,0 +1,67 @@
+---
+description: README and Markdown style guide for project documentation
+globs:
+  - "**/README.md"
+  - "**/README"
+  - "**/*.md"
+  - "**/docs/**"
+alwaysApply: false
+---
+You are writing technical Markdown for researchers and engineers.
+
+STYLE & STRUCTURE RULES
+- Use `##` as the top-level section header (do NOT use `#`).
+- Keep sections short, scannable, and information-dense.
+- Prefer structure over prose: lists, tables, equations, diagrams.
+- One idea per paragraph. Avoid narrative filler.
+- Assume the reader is expert; skip basic explanations.
+
+SECTIONING
+- Each section should answer ONE question.
+- Typical flow:
+  - ## Problem / Goal
+  - ## Key Idea
+  - ## Method
+  - ## Algorithm / Formula
+  - ## Diagram
+  - ## Usage / Example
+  - ## Limitations (optional)
+- If a section has no real content, omit it.
+
+EQUATIONS
+- Use LaTeX equations whenever logic can be formalized.
+- Prefer displayed equations over inline math for core ideas.
+- Define symbols once, then reuse.
+- Example:
+  \[
+  x_{0|t} \sim \mathcal{N}(\mu(x_t), \sigma_t^2 I)
+  \]
+
+DIAGRAMS (MERMAID)
+- Use Mermaid diagrams whenever relationships, flows, or pipelines exist.
+- Place diagrams immediately after the section header introducing them.
+- Prefer:
+  - flowchart for pipelines
+  - sequenceDiagram for agents / async calls
+  - graph TD for dependencies
+- Keep diagrams minimal and readable.
+
+CODE
+- Code blocks must be runnable or directly reusable.
+- No pseudo-code unless explicitly requested.
+- Prefer short snippets over full scripts.
+
+TONE
+- Crisp, neutral, technical.
+- No emojis.
+- No marketing language.
+- Avoid adjectives unless they add information.
+
+DEFAULTS
+- If constraints or failure modes are unknown, omit those sections.
+- If unsure, prefer a compact equation or diagram over text.
+- Optimize for copy-paste into Notion / README / paper drafts.
+
+OUTPUT
+- Return ONLY Markdown.
+- Do not explain what you are doing.

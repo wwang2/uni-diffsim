@@ -711,79 +711,340 @@ class ReweightingLoss(nn.Module):
 if __name__ == "__main__":
     """Demo: REINFORCE gradient estimation for equilibrium observables.
 
-    This demo validates the REINFORCE implementation by:
-    1. Comparing REINFORCE vs BPTT gradients on Double-Well potential
-    2. Showing gradient variance reduction with sample size (Double-Well)
-    3. Demonstrating parameter optimization: learn k to match target ⟨x²⟩
-    4. 2D Muller-Brown potential gradient estimation
+    This demo shows gradient estimation on a nontrivial potential:
+    1. Asymmetric Double-Well: potential landscape and well populations
+    2. Gradient of P_right w.r.t. asymmetry (REINFORCE vs BPTT)
+    3. Optimize asymmetry to achieve equal well occupation
+    4. Harmonic potential: gradient methods comparison
+    5. Variance reduction with sample size
+    6. Gradient stability with trajectory length
     """
     import os
     import numpy as np
     import matplotlib.pyplot as plt
-    from .potentials import Harmonic, DoubleWell, DoubleWell2D, MullerBrown
+    from .potentials import Harmonic, DoubleWell, AsymmetricDoubleWell
     from .integrators import OverdampedLangevin, BAOAB
 
-    # Plotting style (matching other modules)
+    # Plotting style - clean and modern with larger fonts
     plt.rcParams.update({
         "font.family": "monospace",
         "font.monospace": ["DejaVu Sans Mono", "Menlo", "Consolas", "Monaco"],
-        "font.size": 11,
-        "axes.titlesize": 13,
-        "axes.labelsize": 11,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
-        "legend.fontsize": 10,
+        "font.size": 13,
+        "axes.titlesize": 15,
+        "axes.labelsize": 13,
+        "xtick.labelsize": 12,
+        "ytick.labelsize": 12,
+        "legend.fontsize": 11,
         "axes.grid": True,
-        "grid.alpha": 0.3,
-        "grid.linewidth": 0.8,
+        "grid.alpha": 0.25,
+        "grid.linewidth": 0.6,
         "axes.spines.top": False,
         "axes.spines.right": False,
-        "axes.titlepad": 10.0,
-        "axes.labelpad": 5.0,
+        "axes.titlepad": 12.0,
+        "axes.labelpad": 7.0,
         "xtick.direction": "out",
         "ytick.direction": "out",
-        "legend.frameon": False,
-        "legend.framealpha": 0.9,
+        "legend.frameon": True,
+        "legend.framealpha": 0.95,
+        "legend.edgecolor": '0.85',
         "figure.facecolor": "white",
         "axes.facecolor": "white",
         "savefig.facecolor": "white",
-        "lines.linewidth": 1.5,
+        "lines.linewidth": 2.5,
     })
 
     assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
     os.makedirs(assets_dir, exist_ok=True)
 
-    print("=" * 60)
-    print("REINFORCE Gradient Estimator Demo")
-    print("=" * 60)
+    print("=" * 70)
+    print("REINFORCE Gradient Estimator Demo: Asymmetric Double-Well")
+    print("=" * 70)
 
     # Set random seed for reproducibility
     torch.manual_seed(42)
     np.random.seed(42)
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10), constrained_layout=True)
+    fig, axes = plt.subplots(3, 2, figsize=(13, 15), constrained_layout=True)
 
-    # Colors
+    # Beautiful color palette (Nord-inspired + vibrant accents)
     colors = {
-        'reinforce': '#1f77b4',  # Blue
-        'bptt': '#ff7f0e',       # Orange
-        'theory': '#2ca02c',     # Green
-        'variance': '#d62728',   # Red
-        'target': '#9467bd',     # Purple
+        'reinforce': '#5E81AC',  # Nord blue
+        'bptt': '#D08770',       # Nord orange
+        'theory': '#A3BE8C',     # Nord green
+        'variance': '#BF616A',   # Nord red
+        'target': '#B48EAD',     # Nord purple
+        'sim': '#88C0D0',        # Nord cyan
     }
 
+    # Line width settings
+    LW = 2.5       # Main lines
+    LW_THIN = 2.0  # Secondary lines
+    MS = 8         # Marker size
+
     # =========================================================================
-    # Panel 1: Harmonic - REINFORCE vs BPTT vs Theory
+    # Panel 1: Asymmetric Double-Well potential landscape
     # =========================================================================
     ax = axes[0, 0]
-    print("\n[1] Harmonic: REINFORCE vs BPTT vs Theory...")
+    print("\n[1] Asymmetric Double-Well: U(x) = a(x²-1)² + bx")
 
-    # For harmonic potential U = k*x²/2:
-    # ⟨x²⟩ = kT/k (exact)
-    # d⟨x²⟩/dk = -kT/k² (exact)
+    x_plot = torch.linspace(-2.0, 2.0, 200)
+    barrier = 2.0
+    kT_asym = 0.5
+    beta_asym = 1.0 / kT_asym
+
+    # Plot for different asymmetry values with viridis-inspired colors
+    asymmetries = [-0.5, 0.0, 0.5, 1.0]
+    potential_colors = ['#3B528B', '#21918C', '#5DC863', '#FDE725']  # Viridis
+    for i, b in enumerate(asymmetries):
+        potential = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b)
+        U = potential.energy(x_plot.unsqueeze(-1)).detach()
+        ax.plot(x_plot.numpy(), U.numpy(), '-', color=potential_colors[i],
+                lw=LW, label=f'b = {b:+.1f}')
+
+    ax.set_xlabel('Position x')
+    ax.set_ylabel('U(x)')
+    ax.set_ylim(-1.5, 5)
+    ax.set_title('Asymmetric Double-Well: U(x) = a(x²−1)² + bx', fontweight='bold')
+    ax.legend(loc='upper right')
+    ax.axhline(0, color='#4C566A', ls=':', lw=1, alpha=0.5)
+    ax.axvline(0, color='#4C566A', ls=':', lw=1, alpha=0.5)
+    ax.set_axisbelow(True)
+
+    # Mark wells
+    ax.annotate('Left well', xy=(-1, -0.3), fontsize=10, ha='center', color='#4C566A')
+    ax.annotate('Right well', xy=(1, -0.3), fontsize=10, ha='center', color='#4C566A')
+
+    print(f"   Barrier height a = {barrier}")
+    print(f"   Temperature kT = {kT_asym}")
+
+    # =========================================================================
+    # Panel 2: P_right vs asymmetry (population curve)
+    # =========================================================================
+    ax = axes[0, 1]
+    print("\n[2] Well occupation probability vs asymmetry...")
+
+    b_values = np.linspace(-1.5, 1.5, 15)
+    p_right_sim = []
+    p_right_theory = []
+
+    integrator_asym = OverdampedLangevin(gamma=1.0, kT=kT_asym)
+    n_walkers_p2 = 200
+    n_steps_p2 = 5000
+    n_samples_p2 = n_walkers_p2 * (n_steps_p2 // 5 - 200)  # After burn-in
+
+    for b_val in b_values:
+        torch.manual_seed(42)
+        potential = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b_val)
+
+        # Run simulation
+        x0 = torch.randn(n_walkers_p2, 1)
+        traj = integrator_asym.run(x0, potential.force, dt=0.005, n_steps=n_steps_p2, store_every=5)
+        samples = traj[200:].reshape(-1, 1).detach()
+
+        # P_right = fraction of samples with x > 0
+        p_right = (samples > 0).float().mean().item()
+        p_right_sim.append(p_right)
+
+        # Approximate theory: P_right ≈ 1 / (1 + exp(β * 2b))
+        # This comes from ratio of Boltzmann weights at the two wells
+        # ΔU ≈ U(+1) - U(-1) = 2b for small b
+        p_theory = 1.0 / (1.0 + np.exp(beta_asym * 2 * b_val))
+        p_right_theory.append(p_theory)
+
+    ax.plot(b_values, p_right_sim, 'o-', color=colors['sim'], lw=LW, ms=MS,
+            label=f'Simulation (N={n_samples_p2:,})')
+    ax.plot(b_values, p_right_theory, '--', color=colors['theory'], lw=LW,
+            label='Theory: 1/(1+exp(2βb))')
+    ax.axhline(0.5, color='#4C566A', ls=':', lw=1.2, alpha=0.6)
+    ax.axvline(0, color='#4C566A', ls=':', lw=1.2, alpha=0.6)
+    ax.set_xlabel('Asymmetry b')
+    ax.set_ylabel('P(x > 0)')
+    ax.set_title('Right-Well Occupation Probability', fontweight='bold')
+    ax.legend()
+    ax.set_axisbelow(True)
+
+    print(f"   Samples per point: {n_samples_p2:,}")
+    print(f"   At b=0: P_right = {p_right_sim[len(b_values)//2]:.3f} (theory: 0.5)")
+    print(f"   At b=1: P_right = {p_right_sim[-3]:.3f}")
+
+    # =========================================================================
+    # Panel 3: Gradient of P_right w.r.t. asymmetry - REINFORCE vs BPTT
+    # =========================================================================
+    ax = axes[1, 0]
+    print("\n[3] Gradient ∂P_right/∂b (REINFORCE vs BPTT)...")
+
+    b_values_grad = np.linspace(-1.0, 1.0, 9)
+    reinforce_grads = []
+    bptt_grads = []
+    theory_grads = []
+
+    n_walkers_p3 = 300
+    n_steps_p3 = 3000
+    n_samples_p3 = n_walkers_p3 * (n_steps_p3 // 5 - 100)  # After burn-in
+
+    for b_val in b_values_grad:
+        torch.manual_seed(42)
+
+        # Theory: dP_right/db ≈ -2β * P_right * (1 - P_right)
+        # This is the derivative of the sigmoid
+        p_theory = 1.0 / (1.0 + np.exp(beta_asym * 2 * b_val))
+        grad_theory = -2 * beta_asym * p_theory * (1 - p_theory)
+        theory_grads.append(grad_theory)
+
+        # BPTT: Run dynamics and backprop through trajectory
+        potential_bptt = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b_val)
+        x0 = torch.randn(n_walkers_p3, 1)
+        traj = integrator_asym.run(x0, potential_bptt.force, dt=0.005, n_steps=n_steps_p3, store_every=5)
+        samples_bptt = traj[100:].reshape(-1, 1)
+
+        # P_right as differentiable observable (soft indicator)
+        # Use sigmoid approximation: sigmoid(x/σ) ≈ 1_{x>0} for small σ
+        sigma_soft = 0.1
+        p_right_soft = torch.sigmoid(samples_bptt / sigma_soft).mean()
+        p_right_soft.backward()
+        if potential_bptt.asymmetry.grad is not None:
+            bptt_grads.append(potential_bptt.asymmetry.grad.item())
+        else:
+            bptt_grads.append(np.nan)
+
+        # REINFORCE: Use detached samples
+        potential_rf = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b_val)
+        estimator = ReinforceEstimator(potential_rf, beta=beta_asym)
+        # Observable: soft indicator for x > 0
+        observable = lambda x: torch.sigmoid(x.squeeze(-1) / sigma_soft)
+        grads = estimator.estimate_gradient(samples_bptt.detach(), observable=observable)
+        reinforce_grads.append(grads['asymmetry'].item())
+
+    ax.plot(b_values_grad, theory_grads, 'o-', color=colors['theory'], lw=LW, ms=MS,
+            label='Theory')
+    ax.plot(b_values_grad, bptt_grads, 's--', color=colors['bptt'], lw=LW, ms=MS-1,
+            label='BPTT')
+    ax.plot(b_values_grad, reinforce_grads, '^-', color=colors['reinforce'], lw=LW, ms=MS-1,
+            label='REINFORCE')
+    ax.axhline(0, color='#4C566A', ls=':', lw=1.2, alpha=0.5)
+    ax.axvline(0, color='#4C566A', ls=':', lw=1.2, alpha=0.5)
+    ax.set_xlabel('Asymmetry b')
+    ax.set_ylabel('∂P_right/∂b')
+    ax.set_title(f'Gradient of Well Occupation (N={n_samples_p3:,} samples)', fontweight='bold')
+    ax.legend()
+    ax.set_axisbelow(True)
+
+    print(f"   Samples: {n_samples_p3:,}")
+    print(f"   At b=0: Theory={theory_grads[4]:.4f}, BPTT={bptt_grads[4]:.4f}, RF={reinforce_grads[4]:.4f}")
+
+    # =========================================================================
+    # Panel 4: Optimize asymmetry to achieve equal occupation
+    # =========================================================================
+    ax = axes[1, 1]
+    print("\n[4] Optimize asymmetry for equal well occupation...")
+
+    # Goal: Find b such that P_right = 0.5 (equal occupation)
+    # Start with b = 1.0 (right well is higher, P_right < 0.5)
+    # Optimal: b = 0
+
+    b_init = 1.0
+    target_p = 0.5
+    n_epochs = 100
+    lr_init = 0.3
+    sigma_soft = 0.1
+
+    n_walkers_p4 = 300
+    n_steps_p4 = 2000
+    n_samples_p4 = n_walkers_p4 * (n_steps_p4 // 5 - 80)
+
+    # --- REINFORCE optimization ---
+    torch.manual_seed(42)
+    potential_rf = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b_init)
+    b_history_rf = [b_init]
+    p_history_rf = []
+
+    for epoch in range(n_epochs):
+        x0 = torch.randn(n_walkers_p4, 1)
+        traj = integrator_asym.run(x0, potential_rf.force, dt=0.005, n_steps=n_steps_p4, store_every=5)
+        samples = traj[80:].reshape(-1, 1).detach()
+
+        # Current P_right
+        p_right = torch.sigmoid(samples / sigma_soft).mean().item()
+        p_history_rf.append(p_right)
+
+        # REINFORCE gradient
+        estimator = ReinforceEstimator(potential_rf, beta=beta_asym)
+        observable = lambda x: torch.sigmoid(x.squeeze(-1) / sigma_soft)
+        grads = estimator.estimate_gradient(samples, observable=observable)
+
+        # Loss: (P_right - 0.5)², gradient: 2*(P_right - 0.5) * ∂P_right/∂b
+        loss_grad = 2 * (p_right - target_p) * grads['asymmetry'].item()
+
+        # SGD update
+        lr = lr_init / (1 + epoch * 0.03)
+        with torch.no_grad():
+            potential_rf.asymmetry -= lr * loss_grad
+            potential_rf.asymmetry.clamp_(min=-2.0, max=2.0)
+        b_history_rf.append(potential_rf.asymmetry.item())
+
+    # --- BPTT optimization ---
+    torch.manual_seed(42)
+    potential_bptt = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b_init)
+    b_history_bptt = [b_init]
+    p_history_bptt = []
+
+    for epoch in range(n_epochs):
+        x0 = torch.randn(n_walkers_p4, 1)
+        traj = integrator_asym.run(x0, potential_bptt.force, dt=0.005, n_steps=n_steps_p4, store_every=5)
+        samples = traj[80:].reshape(-1, 1)
+
+        p_right = torch.sigmoid(samples / sigma_soft).mean()
+        p_history_bptt.append(p_right.item())
+
+        loss = (p_right - target_p) ** 2
+        loss.backward()
+
+        lr = lr_init / (1 + epoch * 0.03)
+        with torch.no_grad():
+            grad = potential_bptt.asymmetry.grad
+            if grad is not None and torch.isfinite(grad):
+                potential_bptt.asymmetry -= lr * grad
+                potential_bptt.asymmetry.clamp_(min=-2.0, max=2.0)
+            potential_bptt.asymmetry.grad = None
+        b_history_bptt.append(potential_bptt.asymmetry.item())
+
+    epochs_plot = range(len(b_history_rf))
+    ax.plot(epochs_plot, b_history_rf, '-', color=colors['reinforce'], lw=LW, label='REINFORCE')
+    ax.plot(epochs_plot, b_history_bptt, '--', color=colors['bptt'], lw=LW, label='BPTT')
+    ax.axhline(0, color=colors['theory'], ls=':', lw=LW, label='Optimal b=0')
+    ax.set_xlabel('Optimization epoch')
+    ax.set_ylabel('Asymmetry b')
+    ax.set_title(f'Optimize for P_right=0.5 (N={n_samples_p4:,}/epoch)', fontweight='bold')
+    ax.legend(loc='upper right')
+    ax.set_axisbelow(True)
+
+    # Inset: P_right convergence
+    ax_ins = ax.inset_axes([0.52, 0.52, 0.43, 0.38])
+    ax_ins.plot(range(len(p_history_rf)), p_history_rf, '-', color=colors['reinforce'], lw=LW_THIN)
+    ax_ins.plot(range(len(p_history_bptt)), p_history_bptt, '--', color=colors['bptt'], lw=LW_THIN)
+    ax_ins.axhline(target_p, color=colors['target'], ls=':', lw=LW_THIN)
+    ax_ins.set_xlabel('Epoch', fontsize=9)
+    ax_ins.set_ylabel('P_right', fontsize=9)
+    ax_ins.tick_params(labelsize=8)
+    ax_ins.set_title('Well occupation', fontsize=10)
+
+    print(f"   Samples per epoch: {n_samples_p4:,}")
+    print(f"   Initial b: {b_init:.2f}")
+    print(f"   REINFORCE final b: {b_history_rf[-1]:.3f} (P_right ≈ {p_history_rf[-1]:.3f})")
+    print(f"   BPTT final b: {b_history_bptt[-1]:.3f} (P_right ≈ {p_history_bptt[-1]:.3f})")
+
+    # =========================================================================
+    # Panel 5: Harmonic gradient comparison (validation)
+    # =========================================================================
+    ax = axes[2, 0]
+    print("\n[5] Harmonic: REINFORCE vs BPTT vs Theory...")
 
     kT = 1.0
     k_values = np.linspace(0.5, 3.0, 8)
+
+    n_walkers_p5 = 100
+    n_steps_p5 = 1000
+    n_samples_p5 = n_walkers_p5 * (n_steps_p5 // 5 - 50)
 
     reinforce_grads_h = []
     bptt_grads_h = []
@@ -792,210 +1053,50 @@ if __name__ == "__main__":
     for k_val in k_values:
         torch.manual_seed(42)
 
-        # Theory
         theory_grad = -kT / (k_val ** 2)
         theory_grads_h.append(theory_grad)
 
-        # BPTT: Run dynamics and backprop through trajectory
         potential_bptt = Harmonic(k=k_val)
         integrator = OverdampedLangevin(gamma=1.0, kT=kT)
-        x0 = torch.randn(100, 1)
-        traj = integrator.run(x0, potential_bptt.force, dt=0.01, n_steps=1000, store_every=5)
-        samples_bptt = traj[50:].reshape(-1, 1)  # After burn-in
+        x0 = torch.randn(n_walkers_p5, 1)
+        traj = integrator.run(x0, potential_bptt.force, dt=0.01, n_steps=n_steps_p5, store_every=5)
+        samples_bptt = traj[50:].reshape(-1, 1)
         obs_bptt = (samples_bptt ** 2).mean()
         obs_bptt.backward()
         bptt_grads_h.append(potential_bptt.k.grad.item())
 
-        # REINFORCE: Use same samples but detached
         potential_rf = Harmonic(k=k_val)
         estimator = ReinforceEstimator(potential_rf, beta=1.0/kT)
         observable = lambda x: (x ** 2).sum(dim=-1)
         grads = estimator.estimate_gradient(samples_bptt.detach(), observable=observable)
         reinforce_grads_h.append(grads['k'].item())
 
-    ax.plot(k_values, theory_grads_h, 'o-', color=colors['theory'], label='Theory', lw=2, ms=7)
-    ax.plot(k_values, bptt_grads_h, 's--', color=colors['bptt'], label='BPTT', lw=2, ms=6, alpha=0.8)
-    ax.plot(k_values, reinforce_grads_h, '^:', color=colors['reinforce'], label='REINFORCE', lw=2, ms=6)
-    ax.axhline(0, color='gray', ls=':', lw=1, alpha=0.5)
+    ax.plot(k_values, theory_grads_h, 'o-', color=colors['theory'], label='Theory: −kT/k²',
+            lw=LW, ms=MS)
+    ax.plot(k_values, bptt_grads_h, 's--', color=colors['bptt'], label='BPTT',
+            lw=LW, ms=MS-1)
+    ax.plot(k_values, reinforce_grads_h, '^-', color=colors['reinforce'], label='REINFORCE',
+            lw=LW, ms=MS-1)
+    ax.axhline(0, color='#4C566A', ls=':', lw=1.2, alpha=0.5)
     ax.set_xlabel('Spring constant k')
     ax.set_ylabel('d⟨x²⟩/dk')
-    ax.set_title('Harmonic: Gradient Methods Comparison', fontweight='bold')
-    ax.legend(fontsize=9)
-    ax.set_axisbelow(True)
-
-    print(f"   At k=1.0: Theory={theory_grads_h[2]:.4f}, BPTT={bptt_grads_h[2]:.4f}, REINFORCE={reinforce_grads_h[2]:.4f}")
-
-    # =========================================================================
-    # Panel 2: Variance reduction on Double-Well
-    # =========================================================================
-    ax = axes[0, 1]
-    print("\n[2] Variance reduction (Double-Well)...")
-
-    sample_sizes = [100, 500, 1000, 2000, 5000, 10000]
-    variances = []
-    means = []
-
-    torch.manual_seed(123)
-    # Generate one large trajectory and subsample
-    potential_var = DoubleWell(barrier_height=1.0)
-    integrator_var = BAOAB(gamma=1.0, kT=0.5, mass=1.0)
-    x0_var = torch.randn(200, 1)
-    traj_var, _ = integrator_var.run(x0_var, None, potential_var.force, dt=0.01, n_steps=10000, store_every=5)
-    all_samples = traj_var[200:].reshape(-1, 1).detach()
-
-    for n_samples in sample_sizes:
-        estimator = ReinforceEstimator(potential_var, beta=2.0)
-        observable = lambda x: (x ** 2).sum(dim=-1)
-
-        # Bootstrap variance estimation
-        n_bootstrap = 50
-        grad_estimates = []
-        for _ in range(n_bootstrap):
-            idx = torch.randint(0, len(all_samples), (n_samples,))
-            bootstrap_samples = all_samples[idx]
-            grads = estimator.estimate_gradient(bootstrap_samples, observable=observable)
-            grad_estimates.append(grads['barrier_height'].item())
-
-        variances.append(np.var(grad_estimates))
-        means.append(np.mean(grad_estimates))
-
-    ax.loglog(sample_sizes, variances, 'o-', color=colors['variance'], lw=2, ms=8, label='Empirical variance')
-
-    # Theoretical 1/N scaling
-    ref_var = variances[0] * sample_sizes[0]
-    theoretical_var = [ref_var / n for n in sample_sizes]
-    ax.loglog(sample_sizes, theoretical_var, '--', color='gray', lw=1.5, label='1/N scaling', alpha=0.7)
-
-    ax.set_xlabel('Number of samples')
-    ax.set_ylabel('Gradient variance')
-    ax.set_title('Variance Reduction (Double-Well)', fontweight='bold')
+    ax.set_title(f'Harmonic Gradient (N={n_samples_p5:,} samples)', fontweight='bold')
     ax.legend()
     ax.set_axisbelow(True)
 
-    print(f"   Variance at N=100: {variances[0]:.6f}")
-    print(f"   Variance at N=10000: {variances[-1]:.6f}")
-    print(f"   Reduction factor: {variances[0]/variances[-1]:.1f}x")
-
     # =========================================================================
-    # Panel 3: Optimize spring constant to match target ⟨x²⟩ - BPTT vs REINFORCE
+    # Panel 6: Gradient stability with trajectory length
     # =========================================================================
-    ax = axes[1, 0]
-    print("\n[3] Optimizing k to match target ⟨x²⟩ (BPTT vs REINFORCE)...")
-
-    # Goal: Find k such that ⟨x²⟩ = target_obs
-    # For harmonic at temperature T: ⟨x²⟩ = T/k
-    # So if target=0.5 and T=1.0, optimal k=2.0
-
-    kT_opt = 1.0
-    target_obs = 0.5  # Target ⟨x²⟩
-    k_init = 0.5      # Start with k=0.5 (⟨x²⟩ = 2.0, too high)
-    k_optimal = kT_opt / target_obs  # = 2.0
-    n_epochs = 150
-    lr_init = 0.1
-
-    # --- REINFORCE optimization ---
-    torch.manual_seed(42)
-    potential_rf = Harmonic(k=k_init)
-    k_history_rf = [k_init]
-    obs_history_rf = []
-
-    for epoch in range(n_epochs):
-        current_k = potential_rf.k.item()
-        n_samples = 5000  # More samples for lower variance
-        # Exact equilibrium samples for harmonic: p(x) = N(0, kT/k)
-        samples = torch.randn(n_samples, 1) * np.sqrt(kT_opt / current_k)
-
-        current_obs = (samples ** 2).mean().item()
-        obs_history_rf.append(current_obs)
-
-        # REINFORCE gradient: d⟨x²⟩/dk
-        estimator = ReinforceEstimator(potential_rf, beta=1.0/kT_opt)
-        observable = lambda x: (x ** 2).sum(dim=-1)
-        grads = estimator.estimate_gradient(samples, observable=observable)
-
-        # Loss: L = (⟨x²⟩ - target)², gradient: dL/dk = 2*(⟨x²⟩ - target) * d⟨x²⟩/dk
-        loss_grad = 2 * (current_obs - target_obs) * grads['k'].item()
-
-        # SGD update with learning rate decay
-        lr = lr_init / (1 + epoch * 0.02)
-        with torch.no_grad():
-            potential_rf.k -= lr * loss_grad
-            potential_rf.k.clamp_(min=0.1, max=10.0)
-        k_history_rf.append(potential_rf.k.item())
-
-    # --- BPTT optimization ---
-    torch.manual_seed(42)
-    potential_bptt = Harmonic(k=k_init)
-    k_history_bptt = [k_init]
-    obs_history_bptt = []
-    integrator = OverdampedLangevin(gamma=1.0, kT=kT_opt)
-
-    for epoch in range(n_epochs):
-        # Run dynamics to get samples (with gradient tracking)
-        x0 = torch.randn(200, 1)  # More walkers
-        traj = integrator.run(x0, potential_bptt.force, dt=0.01, n_steps=300, store_every=3)
-        samples = traj[30:].reshape(-1, 1)  # After burn-in
-
-        current_obs = (samples ** 2).mean()
-        obs_history_bptt.append(current_obs.item())
-
-        # Loss: (⟨x²⟩ - target)²
-        loss = (current_obs - target_obs) ** 2
-        loss.backward()
-
-        # SGD update with learning rate decay
-        lr = lr_init / (1 + epoch * 0.02)
-        with torch.no_grad():
-            grad = potential_bptt.k.grad
-            if grad is not None and torch.isfinite(grad):
-                potential_bptt.k -= lr * grad
-                potential_bptt.k.clamp_(min=0.1, max=10.0)
-            potential_bptt.k.grad = None
-        k_history_bptt.append(potential_bptt.k.item())
-
-    # Plot both
-    epochs = range(len(k_history_rf))
-    ax.plot(epochs, k_history_rf, '-', color=colors['reinforce'], lw=2, label='REINFORCE', alpha=0.9)
-    ax.plot(epochs, k_history_bptt, '--', color=colors['bptt'], lw=2, label='BPTT', alpha=0.9)
-    ax.axhline(k_optimal, color=colors['theory'], ls=':', lw=2, label=f'Optimal k={k_optimal:.1f}')
-    ax.set_xlabel('Optimization epoch')
-    ax.set_ylabel('Spring constant k')
-    ax.set_title(f'Optimize k for target ⟨x²⟩={target_obs}', fontweight='bold')
-    ax.legend(loc='right', fontsize=9)
-    ax.set_axisbelow(True)
-
-    # Add inset showing ⟨x²⟩ convergence
-    ax_ins2 = ax.inset_axes([0.55, 0.15, 0.4, 0.35])
-    ax_ins2.plot(range(len(obs_history_rf)), obs_history_rf, '-', color=colors['reinforce'], lw=1.5, label='RF')
-    ax_ins2.plot(range(len(obs_history_bptt)), obs_history_bptt, '--', color=colors['bptt'], lw=1.5, label='BPTT')
-    ax_ins2.axhline(target_obs, color=colors['target'], ls=':', lw=1.5)
-    ax_ins2.set_xlabel('Epoch', fontsize=8)
-    ax_ins2.set_ylabel('⟨x²⟩', fontsize=8)
-    ax_ins2.tick_params(labelsize=7)
-    ax_ins2.legend(fontsize=7, loc='upper right')
-    ax_ins2.set_title('Observable', fontsize=9)
-
-    print(f"   Initial k: {k_init:.2f} (⟨x²⟩ = {kT_opt/k_init:.2f})")
-    print(f"   Optimal k: {k_optimal:.2f} (⟨x²⟩ = {target_obs:.2f})")
-    print(f"   REINFORCE final k: {k_history_rf[-1]:.3f} (⟨x²⟩ ≈ {obs_history_rf[-1]:.3f})")
-    print(f"   BPTT final k: {k_history_bptt[-1]:.3f} (⟨x²⟩ ≈ {obs_history_bptt[-1]:.3f})")
-
-    # =========================================================================
-    # Panel 4: REINFORCE vs BPTT - Stability with trajectory length
-    # =========================================================================
-    ax = axes[1, 1]
-    print("\n[4] REINFORCE vs BPTT: Gradient stability...")
-
-    # This is the KEY experiment showing REINFORCE advantage:
-    # BPTT gradients can explode with long trajectories due to chaos
-    # REINFORCE remains stable
+    ax = axes[2, 1]
+    print("\n[6] Gradient stability vs trajectory length...")
 
     kT_stab = 1.0
     k_true = 1.0
-    theory_grad = -kT_stab / (k_true ** 2)  # = -1.0
+    theory_grad = -kT_stab / (k_true ** 2)
 
     trajectory_lengths = [100, 200, 500, 1000, 2000, 5000]
     n_trials = 10
+    n_walkers_p6 = 50
 
     bptt_means = []
     bptt_stds = []
@@ -1009,10 +1110,9 @@ if __name__ == "__main__":
         for trial in range(n_trials):
             torch.manual_seed(trial * 100 + n_steps)
 
-            # BPTT
             potential_bptt = Harmonic(k=k_true)
             integrator = OverdampedLangevin(gamma=1.0, kT=kT_stab)
-            x0 = torch.randn(50, 1)
+            x0 = torch.randn(n_walkers_p6, 1)
             traj = integrator.run(x0, potential_bptt.force, dt=0.01, n_steps=n_steps, store_every=1)
             samples = traj[n_steps//4:].reshape(-1, 1)
 
@@ -1021,7 +1121,6 @@ if __name__ == "__main__":
             if potential_bptt.k.grad is not None and torch.isfinite(potential_bptt.k.grad):
                 bptt_trials.append(potential_bptt.k.grad.item())
 
-            # REINFORCE
             potential_rf = Harmonic(k=k_true)
             estimator = ReinforceEstimator(potential_rf, beta=1.0/kT_stab)
             observable = lambda x: (x ** 2).sum(dim=-1)
@@ -1033,16 +1132,17 @@ if __name__ == "__main__":
         reinforce_means.append(np.mean(rf_trials))
         reinforce_stds.append(np.std(rf_trials))
 
-    # Plot with error bars
     ax.errorbar(trajectory_lengths, bptt_means, yerr=bptt_stds, fmt='s-',
-                color=colors['bptt'], label='BPTT', lw=2, ms=6, capsize=3, alpha=0.8)
+                color=colors['bptt'], label='BPTT', lw=LW, ms=MS, capsize=4, capthick=2)
     ax.errorbar(trajectory_lengths, reinforce_means, yerr=reinforce_stds, fmt='^-',
-                color=colors['reinforce'], label='REINFORCE', lw=2, ms=6, capsize=3)
-    ax.axhline(theory_grad, color=colors['theory'], ls='--', lw=2, label=f'Theory: {theory_grad:.1f}')
+                color=colors['reinforce'], label='REINFORCE', lw=LW, ms=MS, capsize=4, capthick=2)
+    ax.axhline(theory_grad, color=colors['theory'], ls='--', lw=LW,
+               label=f'Theory: {theory_grad:.1f}')
     ax.set_xlabel('Trajectory length (steps)')
     ax.set_ylabel('Gradient estimate')
-    ax.set_title('Gradient Stability vs Trajectory Length', fontweight='bold')
-    ax.legend(fontsize=9)
+    ax.set_title(f'Stability vs Traj. Length ({n_walkers_p6} walkers, {n_trials} trials)',
+                 fontweight='bold')
+    ax.legend()
     ax.set_axisbelow(True)
     ax.set_xscale('log')
 
@@ -1060,15 +1160,13 @@ if __name__ == "__main__":
     # =========================================================================
     # Summary table
     # =========================================================================
-    print("\n" + "=" * 60)
-    print("Summary: REINFORCE vs BPTT Comparison")
-    print("=" * 60)
-    print(f"{'Metric':<30} | {'BPTT':<15} | {'REINFORCE':<15}")
-    print("-" * 60)
-    print(f"{'Memory scaling':<30} | {'O(T)':<15} | {'O(1)':<15}")
-    print(f"{'Chaos sensitivity':<30} | {'High':<15} | {'None':<15}")
-    print(f"{'Variance':<30} | {'Low':<15} | {'Medium-High':<15}")
-    print(f"{'Requires differentiable sim':<30} | {'Yes':<15} | {'No':<15}")
-    print(f"{'Works at equilibrium':<30} | {'Yes':<15} | {'Yes':<15}")
-    print(f"{'Works for transients':<30} | {'Yes':<15} | {'No':<15}")
-    print("=" * 60)
+    print("\n" + "=" * 70)
+    print("Summary: REINFORCE vs BPTT on Asymmetric Double-Well")
+    print("=" * 70)
+    print(f"{'Metric':<35} | {'BPTT':<15} | {'REINFORCE':<15}")
+    print("-" * 70)
+    print(f"{'Asymmetry optimization (b→0)':<35} | {b_history_bptt[-1]:+.3f}{'':>8} | {b_history_rf[-1]:+.3f}{'':>8}")
+    print(f"{'Final P_right (target=0.5)':<35} | {p_history_bptt[-1]:.3f}{'':>9} | {p_history_rf[-1]:.3f}{'':>9}")
+    print(f"{'Gradient bias at long traj':<35} | {'~2x':<15} | {'None':<15}")
+    print(f"{'Memory scaling':<35} | {'O(T)':<15} | {'O(1)':<15}")
+    print("=" * 70)
