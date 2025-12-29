@@ -8,6 +8,7 @@ from .integrators import (
 )
 from .gradient_estimators import (
     ReinforceEstimator, GirsanovEstimator, ReweightingLoss,
+    ImplicitDiffEstimator,
     reinforce_gradient,
 )
 
@@ -22,5 +23,6 @@ __all__ = [
     "kinetic_energy", "temperature",
     # Gradient Estimators
     "ReinforceEstimator", "GirsanovEstimator", "ReweightingLoss",
+    "ImplicitDiffEstimator",
     "reinforce_gradient",
 ]
