@@ -41,6 +41,33 @@ pip install -e ".[dev]"
 | `Harmonic` | d | Reference |
 
 
+## Gradient Estimators
+
+![Gradient Estimators](assets/gradient_estimators.png)
+
+Two approaches for computing gradients of equilibrium observables with respect to potential parameters:
+
+| Estimator | Method | Pros | Cons |
+|-----------|--------|------|------|
+| **BPTT** | Backprop through trajectory | Exact for finite horizon | Exploding gradients, memory-intensive |
+| **REINFORCE** | Score function / TPT | Stable, O(1) memory | Higher variance, needs equilibrium samples |
+
+The REINFORCE estimator uses the thermodynamic perturbation theory identity:
+```
+∇_θ ⟨O⟩ = -β Cov(O, ∇_θU) = -β [⟨O ∇_θU⟩ - ⟨O⟩⟨∇_θU⟩]
+```
+
+**Key findings** (see plot above):
+1. Both methods agree with theory `d⟨x²⟩/dk = -kT/k²` for harmonic potentials
+2. Both can optimize k to match target ⟨x²⟩ (Panel 3)
+3. BPTT gradients become biased (~2x) at long trajectories while REINFORCE remains stable (Panel 4)
+4. REINFORCE variance decreases as 1/N with sample size (Panel 2)
+
+```bash
+python -m uni_diffsim.gradient_estimators  # Generate the plot
+```
+
+
 ## Usage
 
 ```python

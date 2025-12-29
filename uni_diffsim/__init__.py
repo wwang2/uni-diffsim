@@ -6,6 +6,10 @@ from .integrators import (
     OverdampedLangevin, BAOAB, VelocityVerlet, NoseHooverChain, ESH, GLE,
     kinetic_energy, temperature,
 )
+from .gradient_estimators import (
+    ReinforceEstimator, GirsanovEstimator, ReweightingLoss,
+    reinforce_gradient,
+)
 
 __version__ = "0.1.0"
 __all__ = [
@@ -16,4 +20,7 @@ __all__ = [
     # Integrators
     "OverdampedLangevin", "BAOAB", "VelocityVerlet", "NoseHooverChain", "ESH", "GLE",
     "kinetic_energy", "temperature",
+    # Gradient Estimators
+    "ReinforceEstimator", "GirsanovEstimator", "ReweightingLoss",
+    "reinforce_gradient",
 ]
