@@ -765,7 +765,7 @@ if __name__ == "__main__":
     torch.manual_seed(42)
     np.random.seed(42)
 
-    fig, axes = plt.subplots(3, 3, figsize=(16, 14), constrained_layout=True)
+    fig, axes = plt.subplots(2, 4, figsize=(18, 10), constrained_layout=True)
 
     # Beautiful color palette (Nord-inspired + vibrant accents)
     colors = {
@@ -871,7 +871,7 @@ if __name__ == "__main__":
     # =========================================================================
     # Panel 3: Gradient of P_right w.r.t. asymmetry - REINFORCE vs BPTT
     # =========================================================================
-    ax = axes[1, 0]
+    ax = axes[0, 2]
     print("\n[3] Gradient ∂P_right/∂b (REINFORCE vs BPTT)...")
 
     b_values_grad = np.linspace(-1.0, 1.0, 9)
@@ -936,7 +936,7 @@ if __name__ == "__main__":
     # =========================================================================
     # Panel 4: Optimize asymmetry to achieve equal occupation
     # =========================================================================
-    ax = axes[1, 1]
+    ax = axes[0, 3]
     print("\n[4] Optimize asymmetry for equal well occupation...")
 
     # Goal: Find b such that P_right = 0.5 (equal occupation)
@@ -1037,7 +1037,7 @@ if __name__ == "__main__":
     # =========================================================================
     # Panel 5: Harmonic gradient comparison (validation)
     # =========================================================================
-    ax = axes[2, 0]
+    ax = axes[1, 0]
     print("\n[5] Harmonic: REINFORCE vs BPTT vs Theory...")
 
     kT = 1.0
@@ -1088,7 +1088,7 @@ if __name__ == "__main__":
     # =========================================================================
     # Panel 6: Gradient stability with trajectory length
     # =========================================================================
-    ax = axes[2, 0]
+    ax = axes[1, 1]
     print("\n[6] Gradient stability vs trajectory length...")
 
     kT_stab = 1.0
@@ -1215,7 +1215,7 @@ if __name__ == "__main__":
     # =========================================================================
     # Panel 7: Time Benchmark (BPTT vs REINFORCE)
     # =========================================================================
-    ax = axes[2, 1]
+    ax = axes[1, 2]
     print("\n[7] Computational time comparison...")
 
     ax.plot(benchmark_traj_lengths, bptt_times, 'o-', color=colors['bptt'], lw=LW, ms=MS,
@@ -1240,7 +1240,7 @@ if __name__ == "__main__":
     # =========================================================================
     # Panel 8: Memory Benchmark (BPTT vs REINFORCE)
     # =========================================================================
-    ax = axes[2, 2]
+    ax = axes[1, 3]
     print("\n[8] Memory usage comparison...")
 
     ax.plot(benchmark_traj_lengths, bptt_memory, 'o-', color=colors['bptt'], lw=LW, ms=MS,
