@@ -268,23 +268,23 @@ if __name__ == "__main__":
     import numpy as np
     import matplotlib.pyplot as plt
     
-    # Plotting style
+    # Plotting style with larger fonts
     plt.rcParams.update({
         "font.family": "monospace",
         "font.monospace": ["DejaVu Sans Mono", "Menlo", "Consolas", "Monaco"],
-        "font.size": 11,
-        "axes.titlesize": 12,
-        "axes.labelsize": 11,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
-        "legend.fontsize": 9,
+        "font.size": 13,
+        "axes.titlesize": 15,
+        "axes.labelsize": 13,
+        "xtick.labelsize": 12,
+        "ytick.labelsize": 12,
+        "legend.fontsize": 11,
         "axes.grid": True,
         "grid.alpha": 0.25,
         "grid.linewidth": 0.7,
         "axes.spines.top": False,
         "axes.spines.right": False,
-        "axes.titlepad": 8.0,
-        "axes.labelpad": 4.0,
+        "axes.titlepad": 10.0,
+        "axes.labelpad": 6.0,
         "xtick.direction": "out",
         "ytick.direction": "out",
         "legend.frameon": False,

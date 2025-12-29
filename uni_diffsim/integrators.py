@@ -665,23 +665,23 @@ if __name__ == "__main__":
     from scipy.stats import gaussian_kde
     from .potentials import DoubleWell, DoubleWell2D, Harmonic
     
-    # Plotting style
+    # Plotting style with larger fonts
     plt.rcParams.update({
         "font.family": "monospace",
         "font.monospace": ["DejaVu Sans Mono", "Menlo", "Consolas", "Monaco"],
-        "font.size": 11,
-        "axes.titlesize": 13,
-        "axes.labelsize": 11,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
-        "legend.fontsize": 10,
+        "font.size": 13,
+        "axes.titlesize": 15,
+        "axes.labelsize": 13,
+        "xtick.labelsize": 12,
+        "ytick.labelsize": 12,
+        "legend.fontsize": 11,
         "axes.grid": True,
         "grid.alpha": 0.3,
         "grid.linewidth": 0.8,
         "axes.spines.top": False,
         "axes.spines.right": False,
-        "axes.titlepad": 10.0,
-        "axes.labelpad": 5.0,
+        "axes.titlepad": 12.0,
+        "axes.labelpad": 7.0,
         "xtick.direction": "out",
         "ytick.direction": "out",
         "legend.frameon": False,
