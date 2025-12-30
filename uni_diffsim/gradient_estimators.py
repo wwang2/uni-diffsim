@@ -1090,10 +1090,10 @@ class NoseHooverCheckpointedFunction(torch.autograd.Function):
 
                 # First thermostat half-step
                 v2 = (v_grad**2).sum(dim=-1)
-                alpha_new = alpha_grad + (dt / 4) * (v2 / kT_grad - ndof)
+                alpha_new = alpha_grad + (dt / 4) * (v2 - ndof * kT_grad) / Q_grad
                 v_new = v_grad * torch.exp(-alpha_new.unsqueeze(-1) * dt / 2)
                 v2 = (v_new**2).sum(dim=-1)
-                alpha_new = alpha_new + (dt / 4) * (v2 / kT_grad - ndof)
+                alpha_new = alpha_new + (dt / 4) * (v2 - ndof * kT_grad) / Q_grad
 
                 # Velocity-Verlet for physical degrees of freedom
                 v_new = v_new + (dt / 2) * force_fn(x_grad) / mass_grad
@@ -1102,10 +1102,10 @@ class NoseHooverCheckpointedFunction(torch.autograd.Function):
 
                 # Second thermostat half-step
                 v2 = (v_new**2).sum(dim=-1)
-                alpha_new = alpha_new + (dt / 4) * (v2 / kT_grad - ndof)
+                alpha_new = alpha_new + (dt / 4) * (v2 - ndof * kT_grad) / Q_grad
                 v_new = v_new * torch.exp(-alpha_new.unsqueeze(-1) * dt / 2)
                 v2 = (v_new**2).sum(dim=-1)
-                alpha_new = alpha_new + (dt / 4) * (v2 / kT_grad - ndof)
+                alpha_new = alpha_new + (dt / 4) * (v2 - ndof * kT_grad) / Q_grad
 
                 x_next, v_next, alpha_next = x_new, v_new, alpha_new
 
