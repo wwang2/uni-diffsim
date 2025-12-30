@@ -48,10 +48,32 @@ class OverdampedLangevin(nn.Module):
         noise_scale = torch.sqrt(2 * self.kT * dt / self.gamma)
         return x + (force / self.gamma) * dt + noise_scale * torch.randn_like(x)
     
+    def forward(self, *args, **kwargs):
+        """Alias for run() to support functional calls."""
+        return self.run(*args, **kwargs)
+
     def run(self, x0: torch.Tensor, force_fn: ForceFunc, dt: float, 
-            n_steps: int, store_every: int = 1) -> torch.Tensor:
-        """Run trajectory. Returns (n_stored, ..., dim) positions."""
+            n_steps: int, store_every: int = 1, final_only: bool = False) -> torch.Tensor:
+        """Run trajectory. Returns (n_stored, ..., dim) positions.
+        
+        Args:
+            x0: Initial positions (..., dim)
+            force_fn: Force function
+            dt: Time step
+            n_steps: Number of integration steps
+            store_every: Store trajectory every N steps (ignored if final_only=True)
+            final_only: If True, only return final state with shape (1, ..., dim)
+            
+        Returns:
+            Trajectory of shape (n_stored, ..., dim) or (1, ..., dim) if final_only
+        """
         x = x0
+        
+        if final_only:
+            for i in range(n_steps):
+                x = self.step(x, force_fn, dt)
+            return x.unsqueeze(0)
+        
         n_stored = n_steps // store_every + 1
         traj = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
         traj[0] = x0
@@ -96,13 +118,35 @@ class BAOAB(nn.Module):
         x = x + (dt / 2) * v
         v = v + (dt / 2) * force_fn(x) / self.mass
         return x, v
+
+    def forward(self, *args, **kwargs):
+        """Alias for run() to support functional calls."""
+        return self.run(*args, **kwargs)
     
     def run(self, x0: torch.Tensor, v0: torch.Tensor | None, force_fn: ForceFunc,
-            dt: float, n_steps: int, store_every: int = 1
+            dt: float, n_steps: int, store_every: int = 1, final_only: bool = False
             ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run trajectory. Returns (positions, velocities) each (n_stored, ...)."""
+        """Run trajectory. Returns (positions, velocities) each (n_stored, ...).
+        
+        Args:
+            x0: Initial positions (..., dim)
+            v0: Initial velocities (..., dim), or None to sample from thermal distribution
+            force_fn: Force function
+            dt: Time step
+            n_steps: Number of integration steps
+            store_every: Store trajectory every N steps (ignored if final_only=True)
+            final_only: If True, only return final state with shape (1, ..., dim)
+            
+        Returns:
+            (traj_x, traj_v): Trajectories of shape (n_stored, ..., dim) or (1, ..., dim) if final_only
+        """
         x = x0
         v = v0 if v0 is not None else torch.randn_like(x0) * torch.sqrt(self.kT / self.mass)
+        
+        if final_only:
+            for i in range(n_steps):
+                x, v = self.step(x, v, force_fn, dt)
+            return x.unsqueeze(0), v.unsqueeze(0)
         
         n_stored = n_steps // store_every + 1
         traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
@@ -143,11 +187,34 @@ class VelocityVerlet(nn.Module):
         v = v + (dt / 2) * force_fn(x) / self.mass
         return x, v
     
+    def forward(self, *args, **kwargs):
+        """Alias for run() to support functional calls."""
+        return self.run(*args, **kwargs)
+
     def run(self, x0: torch.Tensor, v0: torch.Tensor, force_fn: ForceFunc,
-            dt: float, n_steps: int, store_every: int = 1
+            dt: float, n_steps: int, store_every: int = 1, final_only: bool = False
             ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run trajectory. Returns (positions, velocities)."""
+        """Run trajectory. Returns (positions, velocities).
+        
+        Args:
+            x0: Initial positions (..., dim)
+            v0: Initial velocities (..., dim)
+            force_fn: Force function
+            dt: Time step
+            n_steps: Number of integration steps
+            store_every: Store trajectory every N steps (ignored if final_only=True)
+            final_only: If True, only return final state with shape (1, ..., dim)
+            
+        Returns:
+            (traj_x, traj_v): Trajectories of shape (n_stored, ..., dim) or (1, ..., dim) if final_only
+        """
         x, v = x0, v0
+        
+        if final_only:
+            for i in range(n_steps):
+                x, v = self.step(x, v, force_fn, dt)
+            return x.unsqueeze(0), v.unsqueeze(0)
+        
         n_stored = n_steps // store_every + 1
         traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
         traj_v = torch.empty((n_stored, *v0.shape), dtype=v0.dtype, device=v0.device)
@@ -227,13 +294,36 @@ class NoseHoover(nn.Module):
         
         return x, v, alpha
     
+    def forward(self, *args, **kwargs):
+        """Alias for run() to support functional calls."""
+        return self.run(*args, **kwargs)
+
     def run(self, x0: torch.Tensor, v0: torch.Tensor | None, force_fn: ForceFunc,
-            dt: float, n_steps: int, store_every: int = 1
+            dt: float, n_steps: int, store_every: int = 1, final_only: bool = False
             ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run trajectory. Returns (positions, velocities)."""
+        """Run trajectory. Returns (positions, velocities).
+        
+        Args:
+            x0: Initial positions (..., dim)
+            v0: Initial velocities (..., dim), or None to sample from thermal distribution
+            force_fn: Force function
+            dt: Time step
+            n_steps: Number of integration steps
+            store_every: Store trajectory every N steps (ignored if final_only=True)
+            final_only: If True, only return final state with shape (1, ..., dim) for memory efficiency
+            
+        Returns:
+            (traj_x, traj_v): Trajectories of shape (n_stored, ..., dim) or (1, ..., dim) if final_only
+        """
         x = x0
         v = v0 if v0 is not None else torch.randn_like(x0) * torch.sqrt(self.kT / self.mass)
         alpha = torch.zeros(x0.shape[:-1], device=x0.device, dtype=x0.dtype)
+        
+        if final_only:
+            # Only run to final state, no trajectory storage
+            for i in range(n_steps):
+                x, v, alpha = self.step(x, v, alpha, force_fn, dt)
+            return x.unsqueeze(0), v.unsqueeze(0)
         
         n_stored = n_steps // store_every + 1
         traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
@@ -329,14 +419,32 @@ class NoseHooverChain(nn.Module):
         return x, v, xi_new
     
     def run(self, x0: torch.Tensor, v0: torch.Tensor | None, force_fn: ForceFunc,
-            dt: float, n_steps: int, store_every: int = 1
+            dt: float, n_steps: int, store_every: int = 1, final_only: bool = False
             ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run trajectory. Returns (positions, velocities)."""
+        """Run trajectory. Returns (positions, velocities).
+        
+        Args:
+            x0: Initial positions (..., dim)
+            v0: Initial velocities (..., dim), or None to sample from thermal distribution
+            force_fn: Force function
+            dt: Time step
+            n_steps: Number of integration steps
+            store_every: Store trajectory every N steps (ignored if final_only=True)
+            final_only: If True, only return final state with shape (1, ..., dim)
+            
+        Returns:
+            (traj_x, traj_v): Trajectories of shape (n_stored, ..., dim) or (1, ..., dim) if final_only
+        """
         x = x0
         v = v0 if v0 is not None else torch.randn_like(x0) * torch.sqrt(self.kT / self.mass)
         ndof = x0.shape[-1]
         xi_shape = x0.shape[:-1] + (self.n_chain,)
         xi = torch.zeros(xi_shape, device=x0.device, dtype=x0.dtype)
+        
+        if final_only:
+            for i in range(n_steps):
+                x, v, xi = self.step(x, v, xi, force_fn, dt, ndof)
+            return x.unsqueeze(0), v.unsqueeze(0)
         
         n_stored = n_steps // store_every + 1
         traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
@@ -473,7 +581,8 @@ class ESH(nn.Module):
         return x, u, r
     
     def run(self, x0: torch.Tensor, u0: torch.Tensor | None, grad_fn: GradFunc,
-            n_steps: int, dt: float | None = None, store_every: int = 1
+            n_steps: int, dt: float | None = None, store_every: int = 1,
+            final_only: bool = False
             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run ESH trajectory.
         
@@ -483,10 +592,11 @@ class ESH(nn.Module):
             grad_fn: gradient of energy ∇E(x)
             n_steps: number of integration steps
             dt: step size (uses self.eps if None)
-            store_every: store every N steps
+            store_every: store every N steps (ignored if final_only=True)
+            final_only: If True, only return final state with shape (1, ..., dim)
             
         Returns:
-            (positions, unit_velocities, log_v_magnitudes)
+            (positions, unit_velocities, log_v_magnitudes) each of shape (n_stored, ...) or (1, ...) if final_only
         """
         eps = dt if dt is not None else self.eps
         x = x0
@@ -498,6 +608,11 @@ class ESH(nn.Module):
             u = u0
         
         r = torch.zeros(x0.shape[:-1], device=x0.device, dtype=x0.dtype)
+        
+        if final_only:
+            for i in range(n_steps):
+                x, u, r = self.step(x, u, r, grad_fn, eps)
+            return x.unsqueeze(0), u.unsqueeze(0), r.unsqueeze(0)
         
         n_stored = n_steps // store_every + 1
         traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
@@ -612,9 +727,22 @@ class GLE(nn.Module):
         return x, v, s
     
     def run(self, x0: torch.Tensor, v0: torch.Tensor | None, force_fn: ForceFunc,
-            dt: float, n_steps: int, store_every: int = 1
+            dt: float, n_steps: int, store_every: int = 1, final_only: bool = False
             ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run GLE trajectory. Returns (positions, velocities)."""
+        """Run GLE trajectory. Returns (positions, velocities).
+        
+        Args:
+            x0: Initial positions (..., dim)
+            v0: Initial velocities (..., dim), or None to sample from thermal distribution
+            force_fn: Force function
+            dt: Time step
+            n_steps: Number of integration steps
+            store_every: Store trajectory every N steps (ignored if final_only=True)
+            final_only: If True, only return final state with shape (1, ..., dim)
+            
+        Returns:
+            (traj_x, traj_v): Trajectories of shape (n_stored, ..., dim) or (1, ..., dim) if final_only
+        """
         device, dtype = x0.device, x0.dtype
         x = x0
         
@@ -628,6 +756,11 @@ class GLE(nn.Module):
         # Initialize auxiliary variables at thermal equilibrium
         s_shape = x0.shape + (self.n_modes,)
         s = torch.randn(s_shape, device=device, dtype=dtype) * torch.sqrt(c * kT)
+        
+        if final_only:
+            for i in range(n_steps):
+                x, v, s = self.step(x, v, s, force_fn, dt)
+            return x.unsqueeze(0), v.unsqueeze(0)
         
         n_stored = n_steps // store_every + 1
         traj_x = torch.empty((n_stored, *x0.shape), dtype=dtype, device=device)
