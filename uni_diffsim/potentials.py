@@ -82,7 +82,7 @@ class DoubleWell(Potential):
     
     def __init__(self, barrier_height: float = 1.0):
         super().__init__()
-        self.barrier_height = nn.Parameter(torch.tensor(barrier_height))
+        self.barrier_height = nn.Parameter(torch.tensor(barrier_height, dtype=torch.float32))
     
     def energy(self, x: torch.Tensor) -> torch.Tensor:
         if x.shape[-1:] == (1,):
@@ -117,8 +117,8 @@ class AsymmetricDoubleWell(Potential):
 
     def __init__(self, barrier_height: float = 1.0, asymmetry: float = 0.0):
         super().__init__()
-        self.barrier_height = nn.Parameter(torch.tensor(barrier_height))
-        self.asymmetry = nn.Parameter(torch.tensor(asymmetry))
+        self.barrier_height = nn.Parameter(torch.tensor(barrier_height, dtype=torch.float32))
+        self.asymmetry = nn.Parameter(torch.tensor(asymmetry, dtype=torch.float32))
 
     def energy(self, x: torch.Tensor) -> torch.Tensor:
         if x.shape[-1:] == (1,):
@@ -132,8 +132,8 @@ class AsymmetricDoubleWell(Potential):
         Returns (U_left, U_right).
         """
         # Approximate well positions (exact for b=0)
-        x_left = torch.tensor(-1.0)
-        x_right = torch.tensor(1.0)
+        x_left = torch.tensor(-1.0, dtype=torch.float32)
+        x_right = torch.tensor(1.0, dtype=torch.float32)
         return self.energy(x_left), self.energy(x_right)
 
 
@@ -152,8 +152,8 @@ class DoubleWell2D(Potential):
     
     def __init__(self, barrier_height: float = 1.0, k_y: float = 1.0):
         super().__init__()
-        self.barrier_height = nn.Parameter(torch.tensor(barrier_height))
-        self.k_y = nn.Parameter(torch.tensor(k_y))
+        self.barrier_height = nn.Parameter(torch.tensor(barrier_height, dtype=torch.float32))
+        self.k_y = nn.Parameter(torch.tensor(k_y, dtype=torch.float32))
     
     def energy(self, xy: torch.Tensor) -> torch.Tensor:
         x, y = xy[..., 0], xy[..., 1]
@@ -171,12 +171,12 @@ class MullerBrown(Potential):
     """
     
     # Standard parameter values
-    _A_default = torch.tensor([-200., -100., -170., 15.])
-    _a_default = torch.tensor([-1., -1., -6.5, 0.7])
-    _b_default = torch.tensor([0., 0., 11., 0.6])
-    _c_default = torch.tensor([-10., -10., -6.5, 0.7])
-    _x0_default = torch.tensor([1., 0., -0.5, -1.])
-    _y0_default = torch.tensor([0., 0.5, 1.5, 1.])
+    _A_default = torch.tensor([-200., -100., -170., 15.], dtype=torch.float32)
+    _a_default = torch.tensor([-1., -1., -6.5, 0.7], dtype=torch.float32)
+    _b_default = torch.tensor([0., 0., 11., 0.6], dtype=torch.float32)
+    _c_default = torch.tensor([-10., -10., -6.5, 0.7], dtype=torch.float32)
+    _x0_default = torch.tensor([1., 0., -0.5, -1.], dtype=torch.float32)
+    _y0_default = torch.tensor([0., 0.5, 1.5, 1.], dtype=torch.float32)
     
     def __init__(self, 
                  A: torch.Tensor | None = None,
@@ -186,12 +186,12 @@ class MullerBrown(Potential):
                  x0: torch.Tensor | None = None,
                  y0: torch.Tensor | None = None):
         super().__init__()
-        self.A = nn.Parameter(A.clone() if A is not None else self._A_default.clone())
-        self.a = nn.Parameter(a.clone() if a is not None else self._a_default.clone())
-        self.b = nn.Parameter(b.clone() if b is not None else self._b_default.clone())
-        self.c = nn.Parameter(c.clone() if c is not None else self._c_default.clone())
-        self.x0 = nn.Parameter(x0.clone() if x0 is not None else self._x0_default.clone())
-        self.y0 = nn.Parameter(y0.clone() if y0 is not None else self._y0_default.clone())
+        self.A = nn.Parameter(A.float().clone() if A is not None else self._A_default.clone())
+        self.a = nn.Parameter(a.float().clone() if a is not None else self._a_default.clone())
+        self.b = nn.Parameter(b.float().clone() if b is not None else self._b_default.clone())
+        self.c = nn.Parameter(c.float().clone() if c is not None else self._c_default.clone())
+        self.x0 = nn.Parameter(x0.float().clone() if x0 is not None else self._x0_default.clone())
+        self.y0 = nn.Parameter(y0.float().clone() if y0 is not None else self._y0_default.clone())
     
     def energy(self, xy: torch.Tensor) -> torch.Tensor:
         """xy: (..., 2) -> (...)"""
@@ -226,14 +226,14 @@ class LennardJones(Potential):
     def __init__(self, eps: float = 1.0, sigma: float = 1.0, 
                  box_size: float | torch.Tensor | None = None):
         super().__init__()
-        self.eps = nn.Parameter(torch.tensor(eps))
-        self.sigma = nn.Parameter(torch.tensor(sigma))
+        self.eps = nn.Parameter(torch.tensor(eps, dtype=torch.float32))
+        self.sigma = nn.Parameter(torch.tensor(sigma, dtype=torch.float32))
         
         if box_size is not None:
             if isinstance(box_size, (int, float)):
-                box_size = torch.tensor([box_size])
+                box_size = torch.tensor([box_size], dtype=torch.float32)
             elif not isinstance(box_size, torch.Tensor):
-                box_size = torch.tensor(box_size)
+                box_size = torch.tensor(box_size, dtype=torch.float32)
             self.register_buffer("box_size", box_size.float())
         else:
             self.box_size = None
@@ -446,9 +446,9 @@ class Harmonic(Potential):
     
     def __init__(self, k: float = 1.0, center: torch.Tensor | None = None):
         super().__init__()
-        self.k = nn.Parameter(torch.tensor(k))
+        self.k = nn.Parameter(torch.tensor(k, dtype=torch.float32))
         if center is not None:
-            self.center = nn.Parameter(center.clone())
+            self.center = nn.Parameter(center.float().clone())
         else:
             self.center = None
     

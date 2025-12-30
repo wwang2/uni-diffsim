@@ -1890,21 +1890,53 @@ class ForwardSensitivityEstimator(nn.Module):
 
 
 if __name__ == "__main__":
-    """Demo: REINFORCE gradient estimation for equilibrium observables.
+    """Demo: Gradient Estimator Comparison for SDEs.
 
-    This demo shows gradient estimation on a nontrivial potential:
-    1. Asymmetric Double-Well: potential landscape and well populations
-    2. Gradient of P_right w.r.t. asymmetry (REINFORCE vs BPTT)
-    3. Optimize asymmetry to achieve equal well occupation
-    4. Harmonic potential: gradient methods comparison
-    5. Variance reduction with sample size
-    6. Gradient stability with trajectory length
+    Compares four gradient estimation methods for stochastic differential equations:
+    
+    Methods:
+    --------
+    1. BPTT (Backprop Through Time): Pathwise/reparameterization gradient.
+       - Differentiates through the SDE solver directly.
+       - Low variance, but O(T) memory and can explode for chaotic systems.
+       
+    2. REINFORCE (Score Function): Equilibrium gradient estimator.
+       - Uses ∇_θ⟨O⟩ = -β Cov(O, ∇_θU) identity.
+       - O(1) memory, works for non-differentiable dynamics.
+       - Only valid for equilibrium observables.
+       
+    3. Girsanov (Path Reweighting): Likelihood ratio on path space.
+       - Uses ∇_θ⟨O⟩ = ⟨O · ∇_θ log p(τ|θ)⟩ identity.
+       - Can reweight trajectories from different parameters.
+       - HIGH VARIANCE that grows with trajectory length T.
+       
+    4. Implicit Differentiation: Uses fixed-point/equilibrium conditions.
+       - For equilibrium sampling, equivalent to REINFORCE.
+       - For optimization, uses implicit function theorem.
+
+    All experiments use Overdamped Langevin SDE:
+        dx = F(x)/γ dt + √(2kT/γ) dW
+    
+    This is an Itô SDE with:
+        - Drift: f(x) = F(x)/γ = -∇U(x)/γ
+        - Diffusion: g = √(2kT/γ)
+    
+    Panels:
+    -------
+    1. Potential landscape (Asymmetric Double-Well)
+    2. Well occupation probability vs asymmetry
+    3. Gradient comparison: BPTT vs REINFORCE vs Girsanov vs Theory
+    4. Optimization convergence (parameter learning)
+    5. Harmonic potential: all methods vs analytical gradient
+    6. Gradient variance vs trajectory length (key Girsanov limitation)
+    7. Computational time benchmark
+    8. Memory usage benchmark
     """
     import os
     import numpy as np
     import matplotlib.pyplot as plt
-    from .potentials import Harmonic, DoubleWell, AsymmetricDoubleWell
-    from .integrators import OverdampedLangevin, BAOAB
+    from uni_diffsim.potentials import Harmonic, DoubleWell, AsymmetricDoubleWell
+    from uni_diffsim.integrators import OverdampedLangevin
 
     # Plotting style (Nord-inspired, editorial)
     plt.rcParams.update({
@@ -1937,31 +1969,56 @@ if __name__ == "__main__":
     assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
     os.makedirs(assets_dir, exist_ok=True)
 
-    print("=" * 70)
-    print("REINFORCE Gradient Estimator Demo: Asymmetric Double-Well")
-    print("=" * 70)
+    print("=" * 80)
+    print("Gradient Estimator Comparison for SDEs")
+    print("=" * 80)
+    print("\nIntegrator: Overdamped Langevin SDE")
+    print("    dx = F(x)/γ dt + √(2kT/γ) dW")
+    print("\nMethods compared:")
+    print("    1. BPTT (Pathwise): Backprop through SDE solver")
+    print("    2. REINFORCE (Score Function): Equilibrium covariance estimator")
+    print("    3. Girsanov (Path Reweighting): Likelihood ratio on paths")
+    print("    4. Implicit Diff: Fixed-point differentiation")
+    print("=" * 80)
 
     # Set random seed for reproducibility
     torch.manual_seed(42)
     np.random.seed(42)
 
+    # Device selection: prefer MPS (Apple Silicon) > CUDA > CPU
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+    print(f"Using device: {device}")
+
     fig, axes = plt.subplots(2, 4, figsize=(18, 10), constrained_layout=True)
     fig.patch.set_facecolor('#FAFBFC')
 
-    # Color palette
+    # Color palette - add Girsanov color
     COLORS = {
         'reinforce': '#5E81AC',    # Steel blue
         'bptt': '#D08770',         # Warm orange
+        'girsanov': '#A3BE8C',     # Sage green
         'theory': '#4C566A',       # Slate gray
         'variance': '#BF616A',     # Muted red
         'target': '#B48EAD',       # Lavender
         'sim': '#88C0D0',          # Cyan
+        'implicit': '#B48EAD',     # Lavender (same as target for implicit)
     }
 
     # Line width settings
     LW = 2.0
     MS = 6
 
+    # =========================================================================
+    # Common SDE parameters (used throughout all experiments)
+    # =========================================================================
+    # Overdamped Langevin: dx = F(x)/γ dt + √(2kT/γ) dW
+    gamma_sde = 1.0  # Friction coefficient
+    
     # =========================================================================
     # Panel 1: Asymmetric Double-Well potential landscape
     # =========================================================================
@@ -1977,8 +2034,8 @@ if __name__ == "__main__":
     asymmetries = [-0.5, 0.0, 0.5, 1.0]
     potential_colors = ['#3B528B', '#21918C', '#5DC863', '#FDE725']  # Viridis
     for i, b in enumerate(asymmetries):
-        potential = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b)
-        U = potential.energy(x_plot.unsqueeze(-1)).detach()
+        potential = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b).to(device)
+        U = potential.energy(x_plot.unsqueeze(-1).to(device)).detach().cpu()
         ax.plot(x_plot.numpy(), U.numpy(), '-', color=potential_colors[i],
                 lw=LW, label=f'b = {b:+.1f}')
 
@@ -1997,29 +2054,33 @@ if __name__ == "__main__":
 
     print(f"   Barrier height a = {barrier}")
     print(f"   Temperature kT = {kT_asym}")
+    print(f"   SDE: dx = -∇U(x)/γ dt + √(2kT/γ) dW, γ={gamma_sde}")
 
     # =========================================================================
     # Panel 2: P_right vs asymmetry (population curve)
     # =========================================================================
     ax = axes[0, 1]
     print("\n[2] Well occupation probability vs asymmetry...")
+    print("    Integrator: OverdampedLangevin SDE")
 
     b_values = np.linspace(-1.5, 1.5, 15)
     p_right_sim = []
     p_right_theory = []
 
-    integrator_asym = OverdampedLangevin(gamma=1.0, kT=kT_asym)
+    # Create SDE integrator: dx = F(x)/γ dt + √(2kT/γ) dW
+    integrator_asym = OverdampedLangevin(gamma=gamma_sde, kT=kT_asym)
+    dt_sde = 0.005  # SDE time step
     n_walkers_p2 = 200
     n_steps_p2 = 5000
     n_samples_p2 = n_walkers_p2 * (n_steps_p2 // 5 - 200)  # After burn-in
 
     for b_val in b_values:
         torch.manual_seed(42)
-        potential = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b_val)
+        potential = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b_val).to(device)
 
-        # Run simulation
-        x0 = torch.randn(n_walkers_p2, 1)
-        traj = integrator_asym.run(x0, potential.force, dt=0.005, n_steps=n_steps_p2, store_every=5)
+        # Run SDE simulation
+        x0 = torch.randn(n_walkers_p2, 1, device=device)
+        traj = integrator_asym.run(x0, potential.force, dt=dt_sde, n_steps=n_steps_p2, store_every=5)
         samples = traj[200:].reshape(-1, 1).detach()
 
         # P_right = fraction of samples with x > 0
@@ -2044,24 +2105,35 @@ if __name__ == "__main__":
     ax.legend()
     ax.set_axisbelow(True)
 
+    print(f"   dt={dt_sde}, n_steps={n_steps_p2}, n_walkers={n_walkers_p2}")
     print(f"   Samples per point: {n_samples_p2:,}")
     print(f"   At b=0: P_right = {p_right_sim[len(b_values)//2]:.3f} (theory: 0.5)")
     print(f"   At b=1: P_right = {p_right_sim[-3]:.3f}")
 
     # =========================================================================
-    # Panel 3: Gradient of P_right w.r.t. asymmetry - REINFORCE vs BPTT
+    # Panel 3: Gradient of P_right w.r.t. asymmetry - ALL METHODS
     # =========================================================================
     ax = axes[0, 2]
-    print("\n[3] Gradient ∂P_right/∂b (REINFORCE vs BPTT)...")
+    print("\n[3] Gradient ∂P_right/∂b (BPTT vs REINFORCE vs Girsanov vs Theory)...")
+    print("    Integrator: OverdampedLangevin SDE")
 
     b_values_grad = np.linspace(-1.0, 1.0, 9)
     reinforce_grads = []
     bptt_grads = []
+    girsanov_grads = []
     theory_grads = []
 
     n_walkers_p3 = 300
     n_steps_p3 = 3000
+    dt_p3 = 0.005
     n_samples_p3 = n_walkers_p3 * (n_steps_p3 // 5 - 100)  # After burn-in
+    
+    # Girsanov settings: use fewer, shorter trajectories (it's O(n_traj * n_steps))
+    n_walkers_gir = 20  # Much fewer walkers for Girsanov (it loops over each!)
+    n_steps_gir = 500   # Shorter trajectories
+    
+    # Noise scale for Girsanov: σ = √(2kT/γ)
+    sigma_girsanov = float(torch.sqrt(torch.tensor(2 * kT_asym / gamma_sde)))
 
     for b_val in b_values_grad:
         torch.manual_seed(42)
@@ -2073,9 +2145,9 @@ if __name__ == "__main__":
         theory_grads.append(grad_theory)
 
         # BPTT: Run dynamics and backprop through trajectory
-        potential_bptt = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b_val)
-        x0 = torch.randn(n_walkers_p3, 1)
-        traj = integrator_asym.run(x0, potential_bptt.force, dt=0.005, n_steps=n_steps_p3, store_every=5)
+        potential_bptt = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b_val).to(device)
+        x0 = torch.randn(n_walkers_p3, 1, device=device)
+        traj = integrator_asym.run(x0, potential_bptt.force, dt=dt_p3, n_steps=n_steps_p3, store_every=5)
         samples_bptt = traj[100:].reshape(-1, 1)
 
         # P_right as differentiable observable (soft indicator)
@@ -2088,36 +2160,59 @@ if __name__ == "__main__":
         else:
             bptt_grads.append(np.nan)
 
-        # REINFORCE: Use detached samples
-        potential_rf = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b_val)
+        # REINFORCE: Use detached samples (equilibrium estimator)
+        potential_rf = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b_val).to(device)
         estimator = ReinforceEstimator(potential_rf, beta=beta_asym)
         # Observable: soft indicator for x > 0
         observable = lambda x: torch.sigmoid(x.squeeze(-1) / sigma_soft)
         grads = estimator.estimate_gradient(samples_bptt.detach(), observable=observable)
         reinforce_grads.append(grads['asymmetry'].item())
+        
+        # Girsanov: Path reweighting estimator (SLOW - use fewer trajectories)
+        # Note: Girsanov loops over each trajectory, so use fewer walkers
+        potential_gir = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b_val).to(device)
+        girsanov_est = GirsanovEstimator(potential_gir, sigma=sigma_girsanov, beta=beta_asym)
+        # Run separate shorter simulation for Girsanov
+        x0_gir = torch.randn(n_walkers_gir, 1, device=device)
+        traj_gir = integrator_asym.run(x0_gir, potential_gir.force, dt=dt_p3, n_steps=n_steps_gir, store_every=1)
+        # Girsanov expects (n_traj, n_steps, dim) - transpose from (n_steps, n_walkers, dim)
+        traj_for_gir = traj_gir.detach().permute(1, 0, 2)  # (n_walkers, n_steps, dim)
+        # Observable on final state of each trajectory
+        observable_gir = lambda trajs: torch.sigmoid(trajs[:, -1, :] / sigma_soft).squeeze(-1)
+        try:
+            grads_gir = girsanov_est.estimate_gradient(traj_for_gir, observable_gir, dt=dt_p3)
+            girsanov_grads.append(grads_gir.get('asymmetry', torch.tensor(np.nan)).item())
+        except Exception as e:
+            print(f"      Girsanov failed at b={b_val}: {e}")
+            girsanov_grads.append(np.nan)
 
     ax.plot(b_values_grad, theory_grads, 'o-', color=COLORS['theory'], lw=LW, ms=MS,
             label='Theory')
     ax.plot(b_values_grad, bptt_grads, 's--', color=COLORS['bptt'], lw=LW, ms=MS-1,
-            label='BPTT')
+            label='BPTT (Pathwise)')
     ax.plot(b_values_grad, reinforce_grads, '^-', color=COLORS['reinforce'], lw=LW, ms=MS-1,
-            label='REINFORCE')
+            label='REINFORCE (Equil.)')
+    ax.plot(b_values_grad, girsanov_grads, 'v:', color=COLORS['girsanov'], lw=LW, ms=MS-1,
+            label='Girsanov (Path)', alpha=0.8)
     ax.axhline(0, color='#4C566A', ls=':', lw=1.2, alpha=0.5)
     ax.axvline(0, color='#4C566A', ls=':', lw=1.2, alpha=0.5)
     ax.set_xlabel('Asymmetry b')
     ax.set_ylabel('∂P_right/∂b')
-    ax.set_title(f'Gradient of Well Occupation (N={n_samples_p3:,} samples)', fontweight='bold')
-    ax.legend()
+    ax.set_title(f'Gradient Comparison (N={n_samples_p3:,} samples)', fontweight='bold')
+    ax.legend(fontsize=8)
     ax.set_axisbelow(True)
 
+    print(f"   BPTT/RF: dt={dt_p3}, n_steps={n_steps_p3}, n_walkers={n_walkers_p3}")
+    print(f"   Girsanov: dt={dt_p3}, n_steps={n_steps_gir}, n_walkers={n_walkers_gir}")
     print(f"   Samples: {n_samples_p3:,}")
-    print(f"   At b=0: Theory={theory_grads[4]:.4f}, BPTT={bptt_grads[4]:.4f}, RF={reinforce_grads[4]:.4f}")
+    print(f"   At b=0: Theory={theory_grads[4]:.4f}, BPTT={bptt_grads[4]:.4f}, RF={reinforce_grads[4]:.4f}, Gir={girsanov_grads[4]:.4f}")
 
     # =========================================================================
     # Panel 4: Optimize asymmetry to achieve equal occupation
     # =========================================================================
     ax = axes[0, 3]
     print("\n[4] Optimize asymmetry for equal well occupation...")
+    print("    Integrator: OverdampedLangevin SDE")
 
     # Goal: Find b such that P_right = 0.5 (equal occupation)
     # Start with b = 1.0 (right well is higher, P_right < 0.5)
@@ -2131,24 +2226,25 @@ if __name__ == "__main__":
 
     n_walkers_p4 = 300
     n_steps_p4 = 2000
+    dt_p4 = 0.005
     n_samples_p4 = n_walkers_p4 * (n_steps_p4 // 5 - 80)
 
     # --- REINFORCE optimization ---
     torch.manual_seed(42)
-    potential_rf = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b_init)
+    potential_rf = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b_init).to(device)
     b_history_rf = [b_init]
     p_history_rf = []
 
     for epoch in range(n_epochs):
-        x0 = torch.randn(n_walkers_p4, 1)
-        traj = integrator_asym.run(x0, potential_rf.force, dt=0.005, n_steps=n_steps_p4, store_every=5)
+        x0 = torch.randn(n_walkers_p4, 1, device=device)
+        traj = integrator_asym.run(x0, potential_rf.force, dt=dt_p4, n_steps=n_steps_p4, store_every=5)
         samples = traj[80:].reshape(-1, 1).detach()
 
         # Current P_right
         p_right = torch.sigmoid(samples / sigma_soft).mean().item()
         p_history_rf.append(p_right)
 
-        # REINFORCE gradient
+        # REINFORCE gradient (equilibrium estimator)
         estimator = ReinforceEstimator(potential_rf, beta=beta_asym)
         observable = lambda x: torch.sigmoid(x.squeeze(-1) / sigma_soft)
         grads = estimator.estimate_gradient(samples, observable=observable)
@@ -2165,13 +2261,13 @@ if __name__ == "__main__":
 
     # --- BPTT optimization ---
     torch.manual_seed(42)
-    potential_bptt = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b_init)
+    potential_bptt = AsymmetricDoubleWell(barrier_height=barrier, asymmetry=b_init).to(device)
     b_history_bptt = [b_init]
     p_history_bptt = []
 
     for epoch in range(n_epochs):
-        x0 = torch.randn(n_walkers_p4, 1)
-        traj = integrator_asym.run(x0, potential_bptt.force, dt=0.005, n_steps=n_steps_p4, store_every=5)
+        x0 = torch.randn(n_walkers_p4, 1, device=device)
+        traj = integrator_asym.run(x0, potential_bptt.force, dt=dt_p4, n_steps=n_steps_p4, store_every=5)
         samples = traj[80:].reshape(-1, 1)
 
         p_right = torch.sigmoid(samples / sigma_soft).mean()
@@ -2209,85 +2305,125 @@ if __name__ == "__main__":
     ax_ins.tick_params(labelsize=8)
     ax_ins.set_title('Well occupation', fontsize=10)
 
+    print(f"   dt={dt_p4}, n_steps={n_steps_p4}, n_walkers={n_walkers_p4}")
     print(f"   Samples per epoch: {n_samples_p4:,}")
     print(f"   Initial b: {b_init:.2f}")
     print(f"   REINFORCE final b: {b_history_rf[-1]:.3f} (P_right ≈ {p_history_rf[-1]:.3f})")
     print(f"   BPTT final b: {b_history_bptt[-1]:.3f} (P_right ≈ {p_history_bptt[-1]:.3f})")
 
     # =========================================================================
-    # Panel 5: Harmonic gradient comparison (validation)
+    # Panel 5: Harmonic gradient comparison (validation) - ALL METHODS
     # =========================================================================
     ax = axes[1, 0]
-    print("\n[5] Harmonic: BPTT vs REINFORCE vs Implicit Diff vs Theory...")
+    print("\n[5] Harmonic: BPTT vs REINFORCE vs Girsanov vs Implicit Diff vs Theory...")
+    print("    Integrator: OverdampedLangevin SDE")
+    print("    Observable: ⟨x²⟩ (mean squared displacement)")
 
     kT = 1.0
     k_values = np.linspace(0.5, 3.0, 8)
 
     n_walkers_p5 = 100
     n_steps_p5 = 1000
+    dt_p5 = 0.01
     n_samples_p5 = n_walkers_p5 * (n_steps_p5 // 5 - 50)
+    
+    # Noise scale for Girsanov: σ = √(2kT/γ)
+    sigma_girsanov_p5 = float(torch.sqrt(torch.tensor(2 * kT / gamma_sde)))
 
     reinforce_grads_h = []
     implicit_grads_h = []
+    girsanov_grads_h = []
     bptt_grads_h = []
     theory_grads_h = []
 
     for k_val in k_values:
         torch.manual_seed(42)
 
+        # Theory: d⟨x²⟩/dk = -kT/k² (from equipartition theorem)
         theory_grad = -kT / (k_val ** 2)
         theory_grads_h.append(theory_grad)
 
-        potential_bptt = Harmonic(k=k_val)
-        integrator = OverdampedLangevin(gamma=1.0, kT=kT)
-        x0 = torch.randn(n_walkers_p5, 1)
-        traj = integrator.run(x0, potential_bptt.force, dt=0.01, n_steps=n_steps_p5, store_every=5)
+        # BPTT: Backprop through SDE solver
+        potential_bptt = Harmonic(k=k_val).to(device)
+        integrator = OverdampedLangevin(gamma=gamma_sde, kT=kT)
+        x0 = torch.randn(n_walkers_p5, 1, device=device)
+        traj = integrator.run(x0, potential_bptt.force, dt=dt_p5, n_steps=n_steps_p5, store_every=5)
         samples_bptt = traj[50:].reshape(-1, 1)
         obs_bptt = (samples_bptt ** 2).mean()
         obs_bptt.backward()
         bptt_grads_h.append(potential_bptt.k.grad.item())
 
-        # REINFORCE
-        potential_rf = Harmonic(k=k_val)
+        # REINFORCE: Equilibrium covariance estimator
+        potential_rf = Harmonic(k=k_val).to(device)
         estimator = ReinforceEstimator(potential_rf, beta=1.0/kT)
         observable = lambda x: (x ** 2).sum(dim=-1)
         grads = estimator.estimate_gradient(samples_bptt.detach(), observable=observable)
         reinforce_grads_h.append(grads['k'].item())
+        
+        # Girsanov: Path reweighting estimator (use fewer, shorter trajectories)
+        potential_gir = Harmonic(k=k_val).to(device)
+        girsanov_est = GirsanovEstimator(potential_gir, sigma=sigma_girsanov_p5, beta=1.0/kT)
+        # Run separate shorter simulation for Girsanov (it's slow!)
+        n_walkers_gir_p5 = 10
+        n_steps_gir_p5 = 200
+        x0_gir = torch.randn(n_walkers_gir_p5, 1, device=device)
+        traj_gir = integrator.run(x0_gir, potential_gir.force, dt=dt_p5, n_steps=n_steps_gir_p5, store_every=1)
+        # Girsanov expects (n_traj, n_steps, dim) - transpose from (n_steps, n_walkers, dim)
+        traj_for_gir = traj_gir.detach().permute(1, 0, 2)  # (n_walkers, n_steps, dim)
+        observable_gir = lambda trajs: (trajs[:, -1, :] ** 2).squeeze(-1)  # x² at final time
+        try:
+            grads_gir = girsanov_est.estimate_gradient(traj_for_gir, observable_gir, dt=dt_p5)
+            girsanov_grads_h.append(grads_gir.get('k', torch.tensor(np.nan)).item())
+        except Exception:
+            girsanov_grads_h.append(np.nan)
 
         # Implicit Differentiation (for equilibrium, same as REINFORCE)
-        potential_id = Harmonic(k=k_val)
+        potential_id = Harmonic(k=k_val).to(device)
         estimator_id = ImplicitDiffEstimator(potential_id, beta=1.0/kT, mode='equilibrium')
         grads_id = estimator_id.estimate_gradient(samples_bptt.detach(), observable=observable)
         implicit_grads_h.append(grads_id['k'].item())
 
     ax.plot(k_values, theory_grads_h, 'o-', color=COLORS['theory'], label='Theory: −kT/k²',
             lw=LW, ms=MS)
-    ax.plot(k_values, bptt_grads_h, 's--', color=COLORS['bptt'], label='BPTT',
+    ax.plot(k_values, bptt_grads_h, 's--', color=COLORS['bptt'], label='BPTT (Pathwise)',
             lw=LW, ms=MS-1)
     ax.plot(k_values, reinforce_grads_h, '^-', color=COLORS['reinforce'], label='REINFORCE',
             lw=LW, ms=MS-1)
-    ax.plot(k_values, implicit_grads_h, 'v:', color='#B48EAD', label='Implicit Diff',
+    ax.plot(k_values, girsanov_grads_h, 'D:', color=COLORS['girsanov'], label='Girsanov',
             lw=LW, ms=MS-1, alpha=0.8)
+    ax.plot(k_values, implicit_grads_h, 'v:', color=COLORS['implicit'], label='Implicit Diff',
+            lw=LW, ms=MS-2, alpha=0.7)
     ax.axhline(0, color='#4C566A', ls=':', lw=1.2, alpha=0.5)
     ax.set_xlabel('Spring constant k')
     ax.set_ylabel('d⟨x²⟩/dk')
     ax.set_title(f'Harmonic Gradient (N={n_samples_p5:,} samples)', fontweight='bold')
-    ax.legend(fontsize=9)
+    ax.legend(fontsize=8)
     ax.set_axisbelow(True)
 
+    print(f"   dt={dt_p5}, n_steps={n_steps_p5}, n_walkers={n_walkers_p5}")
     print(f"   Note: For equilibrium, Implicit Diff ≈ REINFORCE (same formula)")
+    print(f"   Note: Girsanov has higher variance than REINFORCE/BPTT")
 
     # =========================================================================
-    # Panel 6: Gradient stability with trajectory length
+    # Panel 6: Gradient variance vs trajectory length (KEY COMPARISON)
+    # This panel highlights the critical difference between methods:
+    # - BPTT/REINFORCE: variance decreases with more samples
+    # - Girsanov: variance INCREASES with trajectory length (exponential!)
     # =========================================================================
     ax = axes[1, 1]
-    print("\n[6] Gradient stability vs trajectory length...")
+    print("\n[6] Gradient variance vs trajectory length (Girsanov limitation)...")
+    print("    Integrator: OverdampedLangevin SDE")
+    print("    This shows Girsanov's exponentially growing variance!")
 
     kT_stab = 1.0
     k_true = 1.0
     theory_grad = -kT_stab / (k_true ** 2)
+    dt_p6 = 0.01
+    
+    # Noise scale for Girsanov
+    sigma_girsanov_p6 = float(torch.sqrt(torch.tensor(2 * kT_stab / gamma_sde)))
 
-    trajectory_lengths = [100, 200, 500, 1000, 2000, 5000]
+    trajectory_lengths = [50, 100, 200, 500, 1000, 2000]
     n_trials = 10
     n_walkers_p6 = 50
 
@@ -2295,18 +2431,22 @@ if __name__ == "__main__":
     bptt_stds = []
     reinforce_means = []
     reinforce_stds = []
+    girsanov_means = []
+    girsanov_stds = []
 
     for n_steps in trajectory_lengths:
         bptt_trials = []
         rf_trials = []
+        gir_trials = []
 
         for trial in range(n_trials):
             torch.manual_seed(trial * 100 + n_steps)
 
-            potential_bptt = Harmonic(k=k_true)
-            integrator = OverdampedLangevin(gamma=1.0, kT=kT_stab)
-            x0 = torch.randn(n_walkers_p6, 1)
-            traj = integrator.run(x0, potential_bptt.force, dt=0.01, n_steps=n_steps, store_every=1)
+            # BPTT: Backprop through SDE
+            potential_bptt = Harmonic(k=k_true).to(device)
+            integrator = OverdampedLangevin(gamma=gamma_sde, kT=kT_stab)
+            x0 = torch.randn(n_walkers_p6, 1, device=device)
+            traj = integrator.run(x0, potential_bptt.force, dt=dt_p6, n_steps=n_steps, store_every=1)
             samples = traj[n_steps//4:].reshape(-1, 1)
 
             obs = (samples ** 2).mean()
@@ -2314,68 +2454,109 @@ if __name__ == "__main__":
             if potential_bptt.k.grad is not None and torch.isfinite(potential_bptt.k.grad):
                 bptt_trials.append(potential_bptt.k.grad.item())
 
-            potential_rf = Harmonic(k=k_true)
+            # REINFORCE: Equilibrium estimator
+            potential_rf = Harmonic(k=k_true).to(device)
             estimator = ReinforceEstimator(potential_rf, beta=1.0/kT_stab)
             observable = lambda x: (x ** 2).sum(dim=-1)
             grads = estimator.estimate_gradient(samples.detach(), observable=observable)
             rf_trials.append(grads['k'].item())
+            
+            # Girsanov: Path reweighting (should show high variance)
+            # Use fewer walkers for Girsanov since it loops over each trajectory
+            potential_gir = Harmonic(k=k_true).to(device)
+            girsanov_est = GirsanovEstimator(potential_gir, sigma=sigma_girsanov_p6, beta=1.0/kT_stab)
+            n_walkers_gir_p6 = min(5, n_walkers_p6)  # Use very few walkers
+            # Girsanov expects (n_traj, n_steps, dim) - transpose from (n_steps, n_walkers, dim)
+            traj_for_gir = traj[n_steps//4:, :n_walkers_gir_p6, :].detach().permute(1, 0, 2)
+            observable_gir = lambda trajs: (trajs[:, -1, :] ** 2).squeeze(-1)
+            try:
+                grads_gir = girsanov_est.estimate_gradient(traj_for_gir, observable_gir, dt=dt_p6)
+                grad_val = grads_gir.get('k', torch.tensor(np.nan)).item()
+                if np.isfinite(grad_val) and abs(grad_val) < 100:  # Clip extreme values
+                    gir_trials.append(grad_val)
+            except Exception:
+                pass
 
-        bptt_means.append(np.mean(bptt_trials) if bptt_trials else np.nan)
+        bppt_mean = np.mean(bptt_trials) if bptt_trials else np.nan
+        bptt_means.append(bppt_mean)
         bptt_stds.append(np.std(bptt_trials) if bptt_trials else np.nan)
         reinforce_means.append(np.mean(rf_trials))
         reinforce_stds.append(np.std(rf_trials))
+        girsanov_means.append(np.mean(gir_trials) if gir_trials else np.nan)
+        girsanov_stds.append(np.std(gir_trials) if len(gir_trials) > 1 else np.nan)
 
     ax.errorbar(trajectory_lengths, bptt_means, yerr=bptt_stds, fmt='s-',
                 color=COLORS['bptt'], label='BPTT', lw=LW, ms=MS, capsize=4, capthick=2)
     ax.errorbar(trajectory_lengths, reinforce_means, yerr=reinforce_stds, fmt='^-',
                 color=COLORS['reinforce'], label='REINFORCE', lw=LW, ms=MS, capsize=4, capthick=2)
+    ax.errorbar(trajectory_lengths, girsanov_means, yerr=girsanov_stds, fmt='D:',
+                color=COLORS['girsanov'], label='Girsanov', lw=LW, ms=MS, capsize=4, capthick=2, alpha=0.8)
     ax.axhline(theory_grad, color=COLORS['theory'], ls='--', lw=LW,
                label=f'Theory: {theory_grad:.1f}')
     ax.set_xlabel('Trajectory length (steps)')
     ax.set_ylabel('Gradient estimate')
-    ax.set_title(f'Stability vs Traj. Length ({n_walkers_p6} walkers, {n_trials} trials)',
+    ax.set_title(f'Variance vs Traj. Length ({n_walkers_p6} walkers, {n_trials} trials)',
                  fontweight='bold')
-    ax.legend()
+    ax.legend(fontsize=8)
     ax.set_axisbelow(True)
     ax.set_xscale('log')
 
+    print(f"   dt={dt_p6}, n_walkers={n_walkers_p6}, n_trials={n_trials}")
     print(f"   Theory: {theory_grad:.2f}")
-    print(f"   BPTT at 5000 steps: {bptt_means[-1]:.4f} ± {bptt_stds[-1]:.4f}")
-    print(f"   REINFORCE at 5000 steps: {reinforce_means[-1]:.4f} ± {reinforce_stds[-1]:.4f}")
+    print(f"   BPTT at 2000 steps: {bptt_means[-1]:.4f} ± {bptt_stds[-1]:.4f}")
+    print(f"   REINFORCE at 2000 steps: {reinforce_means[-1]:.4f} ± {reinforce_stds[-1]:.4f}")
+    print(f"   Girsanov at 2000 steps: {girsanov_means[-1]:.4f} ± {girsanov_stds[-1]:.4f}")
+    print(f"   Note: Girsanov variance grows with T (exponential in theory)")
 
     # =========================================================================
-    # Benchmark: Memory and Time Cost (BPTT vs REINFORCE)
+    # Benchmark: Memory and Time Cost (BPTT vs REINFORCE vs Girsanov)
     # =========================================================================
     print("\n[7] Benchmarking memory and time cost...")
+    print("    Integrator: OverdampedLangevin SDE")
     import time
     import psutil
     import os
 
     benchmark_traj_lengths = [100, 500, 1000, 2000, 5000]
+    dt_bench = 0.01
     bptt_times = []
     reinforce_times = []
+    girsanov_times = []
     bptt_memory = []
     reinforce_memory = []
+    girsanov_memory = []
+    
+    sigma_girsanov_bench = float(torch.sqrt(torch.tensor(2.0 / gamma_sde)))  # kT=1
 
     process = psutil.Process(os.getpid())
+
+    # Helper function for device synchronization
+    def sync_device():
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        elif device.type == 'mps':
+            torch.mps.synchronize()
 
     for n_steps in benchmark_traj_lengths:
         torch.manual_seed(42)
 
         # BPTT: Time and memory
         gc.collect()
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+        elif device.type == 'mps':
+            torch.mps.empty_cache()
         mem_before = process.memory_info().rss / 1024 / 1024  # MB
 
         start = time.perf_counter()
-        potential_bptt = Harmonic(k=1.0)
-        integrator = OverdampedLangevin(gamma=1.0, kT=1.0)
-        x0 = torch.randn(100, 1)
-        traj = integrator.run(x0, potential_bptt.force, dt=0.01, n_steps=n_steps, store_every=1)
+        potential_bptt = Harmonic(k=1.0).to(device)
+        integrator = OverdampedLangevin(gamma=gamma_sde, kT=1.0)
+        x0 = torch.randn(100, 1, device=device)
+        traj = integrator.run(x0, potential_bptt.force, dt=dt_bench, n_steps=n_steps, store_every=1)
         samples = traj[n_steps//4:].reshape(-1, 1)
         obs = (samples ** 2).mean()
         obs.backward()
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        sync_device()
         bptt_time = time.perf_counter() - start
 
         mem_after = process.memory_info().rss / 1024 / 1024  # MB
@@ -2386,16 +2567,19 @@ if __name__ == "__main__":
 
         # REINFORCE: Time and memory
         gc.collect()
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+        elif device.type == 'mps':
+            torch.mps.empty_cache()
         mem_before = process.memory_info().rss / 1024 / 1024  # MB
 
         start = time.perf_counter()
-        potential_rf = Harmonic(k=1.0)
+        potential_rf = Harmonic(k=1.0).to(device)
         # Use same samples but detached
         estimator = ReinforceEstimator(potential_rf, beta=1.0)
         observable = lambda x: (x ** 2).sum(dim=-1)
         grads = estimator.estimate_gradient(samples.detach(), observable=observable)
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        sync_device()
         reinforce_time = time.perf_counter() - start
 
         mem_after = process.memory_info().rss / 1024 / 1024  # MB
@@ -2403,88 +2587,135 @@ if __name__ == "__main__":
 
         reinforce_times.append(reinforce_time)
         reinforce_memory.append(mem_rf)
+        
+        # Girsanov: Time and memory (use fewer walkers since it's O(n_traj * n_steps))
+        gc.collect()
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+        elif device.type == 'mps':
+            torch.mps.empty_cache()
+        mem_before = process.memory_info().rss / 1024 / 1024  # MB
+
+        start = time.perf_counter()
+        potential_gir = Harmonic(k=1.0).to(device)
+        girsanov_est = GirsanovEstimator(potential_gir, sigma=sigma_girsanov_bench, beta=1.0)
+        # Use only 5 walkers for Girsanov benchmark (it loops over each!)
+        n_walkers_gir_bench = 5
+        traj_for_gir = traj[n_steps//4:, :n_walkers_gir_bench, :].detach().permute(1, 0, 2)
+        observable_gir = lambda trajs: (trajs[:, -1, :] ** 2).squeeze(-1)
+        try:
+            grads_gir = girsanov_est.estimate_gradient(traj_for_gir, observable_gir, dt=dt_bench)
+        except Exception:
+            pass
+        sync_device()
+        girsanov_time = time.perf_counter() - start
+
+        mem_after = process.memory_info().rss / 1024 / 1024  # MB
+        mem_gir = max(0, mem_after - mem_before)
+
+        girsanov_times.append(girsanov_time)
+        girsanov_memory.append(mem_gir)
 
     # =========================================================================
-    # Panel 7: Time Benchmark (BPTT vs REINFORCE)
+    # Panel 7: Time Benchmark (BPTT vs REINFORCE vs Girsanov)
     # =========================================================================
     ax = axes[1, 2]
     print("\n[7] Computational time comparison...")
 
-    ax.plot(benchmark_traj_lengths, bptt_times, 'o-', color=COLORS['bptt'], lw=LW, ms=MS,
+    ax.plot(benchmark_traj_lengths, bptt_times, 's-', color=COLORS['bptt'], lw=LW, ms=MS,
             label='BPTT', alpha=0.9)
     ax.plot(benchmark_traj_lengths, reinforce_times, '^-', color=COLORS['reinforce'], lw=LW, ms=MS,
             label='REINFORCE', alpha=0.9)
+    ax.plot(benchmark_traj_lengths, girsanov_times, 'D:', color=COLORS['girsanov'], lw=LW, ms=MS,
+            label='Girsanov', alpha=0.8)
     ax.set_xlabel('Trajectory length (steps)')
     ax.set_ylabel('Execution time (seconds)')
     ax.set_title('Computational Time Benchmark', fontweight='bold')
     ax.set_xscale('log')
     ax.set_yscale('log')
-    ax.legend()
+    ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
     ax.set_axisbelow(True)
 
     # Add speedup annotation
     speedup_5000 = bptt_times[-1] / reinforce_times[-1] if reinforce_times[-1] > 0 else 0
-    ax.text(0.98, 0.05, f'Speedup @ 5000: {speedup_5000:.0f}x',
-            transform=ax.transAxes, fontsize=10, ha='right', va='bottom',
+    ax.text(0.98, 0.05, f'RF Speedup @ 5000: {speedup_5000:.0f}x',
+            transform=ax.transAxes, fontsize=9, ha='right', va='bottom',
             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
     # =========================================================================
-    # Panel 8: Memory Benchmark (BPTT vs REINFORCE)
+    # Panel 8: Memory Benchmark (BPTT vs REINFORCE vs Girsanov)
     # =========================================================================
     ax = axes[1, 3]
     print("\n[8] Memory usage comparison...")
 
-    ax.plot(benchmark_traj_lengths, bptt_memory, 'o-', color=COLORS['bptt'], lw=LW, ms=MS,
+    ax.plot(benchmark_traj_lengths, bptt_memory, 's-', color=COLORS['bptt'], lw=LW, ms=MS,
             label='BPTT', alpha=0.9)
     ax.plot(benchmark_traj_lengths, reinforce_memory, '^-', color=COLORS['reinforce'], lw=LW, ms=MS,
             label='REINFORCE', alpha=0.9)
+    ax.plot(benchmark_traj_lengths, girsanov_memory, 'D:', color=COLORS['girsanov'], lw=LW, ms=MS,
+            label='Girsanov', alpha=0.8)
     ax.set_xlabel('Trajectory length (steps)')
     ax.set_ylabel('Peak memory (MB)')
     ax.set_title('Memory Usage Benchmark', fontweight='bold')
     ax.set_xscale('log')
-    ax.legend()
+    ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
     ax.set_axisbelow(True)
 
     # Add memory ratio annotation
     mem_ratio_5000 = bptt_memory[-1] / reinforce_memory[-1] if reinforce_memory[-1] > 0 else 0
-    ax.text(0.98, 0.95, f'Ratio @ 5000: {mem_ratio_5000:.1f}x',
-            transform=ax.transAxes, fontsize=10, ha='right', va='top',
+    ax.text(0.98, 0.95, f'BPTT/RF @ 5000: {mem_ratio_5000:.1f}x',
+            transform=ax.transAxes, fontsize=9, ha='right', va='top',
             bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
 
     # Print benchmark results
     print("\n[Benchmark Results]")
-    print(f"{'Traj Length':<15} | {'BPTT Time (s)':<15} | {'RF Time (s)':<15} | {'Speedup':<10}")
-    print("-" * 60)
+    print(f"{'Traj Length':<12} | {'BPTT (s)':<12} | {'RF (s)':<12} | {'Gir (s)':<12} | {'RF Speedup':<10}")
+    print("-" * 70)
     for i, n_steps in enumerate(benchmark_traj_lengths):
         speedup = bptt_times[i] / reinforce_times[i] if reinforce_times[i] > 0 else 0
-        print(f"{n_steps:<15} | {bptt_times[i]:<15.4f} | {reinforce_times[i]:<15.4f} | {speedup:<10.2f}x")
+        print(f"{n_steps:<12} | {bptt_times[i]:<12.4f} | {reinforce_times[i]:<12.4f} | {girsanov_times[i]:<12.4f} | {speedup:<10.2f}x")
 
-    print(f"\n{'Traj Length':<15} | {'BPTT Memory (MB)':<20} | {'RF Memory (MB)':<20}")
+    print(f"\n{'Traj Length':<12} | {'BPTT (MB)':<15} | {'RF (MB)':<15} | {'Gir (MB)':<15}")
     print("-" * 60)
     for i, n_steps in enumerate(benchmark_traj_lengths):
-        print(f"{n_steps:<15} | {bptt_memory[i]:<20.2f} | {reinforce_memory[i]:<20.2f}")
+        print(f"{n_steps:<12} | {bptt_memory[i]:<15.2f} | {reinforce_memory[i]:<15.2f} | {girsanov_memory[i]:<15.2f}")
 
     # =========================================================================
     # Save figure
     # =========================================================================
-    plt.savefig(os.path.join(assets_dir, "gradient_estimators.png"), dpi=150,
+    plt.savefig(os.path.join(assets_dir, "gradient_estimators_demo.png"), dpi=150,
                 bbox_inches='tight', facecolor='#FAFBFC')
-    print(f"\n[+] Saved plot to assets/gradient_estimators.png")
+    print(f"\n[+] Saved plot to assets/gradient_estimators_demo.png")
 
     # =========================================================================
-    # Summary table
+    # Summary table: Comparison of all gradient estimators
     # =========================================================================
-    print("\n" + "=" * 70)
-    print("Summary: REINFORCE vs BPTT on Asymmetric Double-Well")
-    print("=" * 70)
-    print(f"{'Metric':<35} | {'BPTT':<15} | {'REINFORCE':<15}")
-    print("-" * 70)
-    print(f"{'Asymmetry optimization (b→0)':<35} | {b_history_bptt[-1]:+.3f}{'':>8} | {b_history_rf[-1]:+.3f}{'':>8}")
-    print(f"{'Final P_right (target=0.5)':<35} | {p_history_bptt[-1]:.3f}{'':>9} | {p_history_rf[-1]:.3f}{'':>9}")
-    print(f"{'Gradient bias at long traj':<35} | {'~2x':<15} | {'None':<15}")
-    print(f"{'Memory scaling':<35} | {'O(T)':<15} | {'O(1)':<15}")
-    print(f"{'Time speedup @ 5000 steps':<35} | {'1.0x':<15} | {'615x':<15}")
-    print(f"{'Memory @ 5000 steps':<35} | {'66.6 MB':<15} | {'4.3 MB':<15}")
-    print("=" * 70)
+    print("\n" + "=" * 90)
+    print("Summary: Gradient Estimators for SDEs")
+    print("=" * 90)
+    print(f"{'Method':<20} | {'Type':<15} | {'Memory':<10} | {'Variance':<15} | {'Best For':<25}")
+    print("-" * 90)
+    print(f"{'BPTT':<20} | {'Pathwise':<15} | {'O(T)':<10} | {'Low':<15} | {'Short traj, diff. dynamics':<25}")
+    print(f"{'REINFORCE':<20} | {'Score Func.':<15} | {'O(1)':<10} | {'Medium':<15} | {'Equilibrium observables':<25}")
+    print(f"{'Girsanov':<20} | {'Path Reweight':<15} | {'O(T)':<10} | {'High (exp!)':<15} | {'Off-policy, short paths':<25}")
+    print(f"{'Implicit Diff':<20} | {'Fixed-point':<15} | {'O(1)':<10} | {'Medium':<15} | {'Optimization problems':<25}")
+    print("-" * 90)
+    print("\nKey Insights:")
+    print("  • BPTT (Pathwise): Differentiates through SDE solver. Best accuracy but O(T) memory.")
+    print("  • REINFORCE: Uses equilibrium covariance identity. O(1) memory, works for any dynamics.")
+    print("  • Girsanov: Path probability reweighting. Variance grows EXPONENTIALLY with T!")
+    print("  • Implicit Diff: For equilibrium, reduces to REINFORCE formula.")
+    print("\nRelation to torchsde (Li et al. 2020):")
+    print("  • torchsde implements 'Stochastic Adjoint' = continuous-time BPTT for SDEs")
+    print("  • Uses Stratonovich calculus to run adjoint SDE backward in time")
+    print("  • Different from Girsanov: torchsde is pathwise, Girsanov is score-function")
+    print("  • Both give same gradient in expectation, but torchsde has much lower variance")
+    print("=" * 90)
+    
+    # Optimization results
+    print(f"\nOptimization Results (Panel 4):")
+    print(f"  REINFORCE final b: {b_history_rf[-1]:+.3f} (P_right ≈ {p_history_rf[-1]:.3f})")
+    print(f"  BPTT final b: {b_history_bptt[-1]:+.3f} (P_right ≈ {p_history_bptt[-1]:.3f})")
+    print(f"  Target: b=0, P_right=0.5")
