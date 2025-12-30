@@ -504,8 +504,14 @@ class GirsanovEstimator(nn.Module):
         # Sum over all dimensions (including particle dims if present)
         # Assume last dim is spatial dim, but might have particle dim before it
         # We flatten spatial dimensions for dot product
-        flat_dims = tuple(range(1, forces.ndim))
-        integrand = (1 / self.sigma**2) * (forces * noise_increment).sum(dim=flat_dims)
+
+        # Determine event dimensions to sum over
+        event_dim = getattr(self.potential, 'event_dim', 1)
+        # Sum over the last event_dim dimensions
+        # forces shape: (time, batch..., event_dim...)
+        sum_dims = tuple(range(-event_dim, 0))
+
+        integrand = (1 / self.sigma**2) * (forces * noise_increment).sum(dim=sum_dims)
 
         # Integrate over trajectory
         log_score = integrand.sum(dim=0)  # Sum over time
