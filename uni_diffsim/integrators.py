@@ -18,7 +18,7 @@ via backpropagation through the trajectory.
 
 import torch
 import torch.nn as nn
-from typing import Callable
+from typing import Callable, Tuple
 import math
 
 
@@ -26,7 +26,51 @@ ForceFunc = Callable[[torch.Tensor], torch.Tensor]
 GradFunc = Callable[[torch.Tensor], torch.Tensor]  # For ESH: gradient of energy
 
 
-class OverdampedLangevin(nn.Module):
+class Integrator(nn.Module):
+    """Base class for integrators.
+
+    Provides utility methods for running trajectories and handling storage.
+    """
+
+    def _run_loop(self, state: tuple[torch.Tensor, ...],
+                  step_fn: Callable[[tuple[torch.Tensor, ...]], tuple[torch.Tensor, ...]],
+                  n_steps: int, store_every: int = 1, final_only: bool = False
+                  ) -> tuple[torch.Tensor, ...]:
+        """Generic trajectory loop.
+
+        Args:
+            state: Initial state (tuple of tensors)
+            step_fn: Function mapping current state -> new state
+            n_steps: Number of steps
+            store_every: Storage frequency
+            final_only: If True, only return final state (unsqueeze(0))
+
+        Returns:
+            Tuple of trajectory tensors.
+        """
+        if final_only:
+            for i in range(n_steps):
+                state = step_fn(state)
+            # Return tuple of (1, ...) tensors
+            return tuple(s.unsqueeze(0) for s in state)
+
+        n_stored = n_steps // store_every + 1
+        traj = [torch.empty((n_stored, *s.shape), dtype=s.dtype, device=s.device) for s in state]
+
+        for i, s in enumerate(state):
+            traj[i][0] = s
+
+        idx = 1
+        for i in range(1, n_steps + 1):
+            state = step_fn(state)
+            if i % store_every == 0:
+                for j, s in enumerate(state):
+                    traj[j][idx] = s
+                idx += 1
+        return tuple(traj)
+
+
+class OverdampedLangevin(Integrator):
     """Overdamped Langevin dynamics: dx = F/γ dt + √(2kT/γ) dW.
     
     High-friction limit where inertia is negligible.
@@ -67,27 +111,15 @@ class OverdampedLangevin(nn.Module):
         Returns:
             Trajectory of shape (n_stored, ..., dim) or (1, ..., dim) if final_only
         """
-        x = x0
+        def step_wrapper(state: tuple[torch.Tensor]) -> tuple[torch.Tensor]:
+            (x,) = state
+            return (self.step(x, force_fn, dt),)
         
-        if final_only:
-            for i in range(n_steps):
-                x = self.step(x, force_fn, dt)
-            return x.unsqueeze(0)
-        
-        n_stored = n_steps // store_every + 1
-        traj = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
-        traj[0] = x0
-        
-        idx = 1
-        for i in range(1, n_steps + 1):
-            x = self.step(x, force_fn, dt)
-            if i % store_every == 0:
-                traj[idx] = x
-                idx += 1
-        return traj
+        results = self._run_loop((x0,), step_wrapper, n_steps, store_every, final_only)
+        return results[0]
 
 
-class BAOAB(nn.Module):
+class BAOAB(Integrator):
     """BAOAB splitting for underdamped Langevin dynamics.
     
     B: velocity kick (half), A: position drift (half), O: Ornstein-Uhlenbeck noise,
@@ -140,32 +172,16 @@ class BAOAB(nn.Module):
         Returns:
             (traj_x, traj_v): Trajectories of shape (n_stored, ..., dim) or (1, ..., dim) if final_only
         """
-        x = x0
         v = v0 if v0 is not None else torch.randn_like(x0) * torch.sqrt(self.kT / self.mass)
         
-        if final_only:
-            for i in range(n_steps):
-                x, v = self.step(x, v, force_fn, dt)
-            return x.unsqueeze(0), v.unsqueeze(0)
+        def step_wrapper(state: tuple[torch.Tensor, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+            x, v = state
+            return self.step(x, v, force_fn, dt)
         
-        n_stored = n_steps // store_every + 1
-        traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
-        traj_v = torch.empty((n_stored, *v.shape), dtype=v.dtype, device=v.device)
-        
-        traj_x[0] = x0
-        traj_v[0] = v
-        
-        idx = 1
-        for i in range(1, n_steps + 1):
-            x, v = self.step(x, v, force_fn, dt)
-            if i % store_every == 0:
-                traj_x[idx] = x
-                traj_v[idx] = v
-                idx += 1
-        return traj_x, traj_v
+        return self._run_loop((x0, v), step_wrapper, n_steps, store_every, final_only)
 
 
-class VelocityVerlet(nn.Module):
+class VelocityVerlet(Integrator):
     """Symplectic velocity Verlet integrator (NVE ensemble).
     
     Preserves phase-space volume and has excellent energy conservation.
@@ -208,31 +224,14 @@ class VelocityVerlet(nn.Module):
         Returns:
             (traj_x, traj_v): Trajectories of shape (n_stored, ..., dim) or (1, ..., dim) if final_only
         """
-        x, v = x0, v0
+        def step_wrapper(state: tuple[torch.Tensor, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+            x, v = state
+            return self.step(x, v, force_fn, dt)
         
-        if final_only:
-            for i in range(n_steps):
-                x, v = self.step(x, v, force_fn, dt)
-            return x.unsqueeze(0), v.unsqueeze(0)
-        
-        n_stored = n_steps // store_every + 1
-        traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
-        traj_v = torch.empty((n_stored, *v0.shape), dtype=v0.dtype, device=v0.device)
-        
-        traj_x[0] = x0
-        traj_v[0] = v0
-        
-        idx = 1
-        for i in range(1, n_steps + 1):
-            x, v = self.step(x, v, force_fn, dt)
-            if i % store_every == 0:
-                traj_x[idx] = x
-                traj_v[idx] = v
-                idx += 1
-        return traj_x, traj_v
+        return self._run_loop((x0, v0), step_wrapper, n_steps, store_every, final_only)
 
 
-class NoseHoover(nn.Module):
+class NoseHoover(Integrator):
     """Single Nosé-Hoover thermostat for deterministic canonical sampling.
     
     Uses the Kleinerman 08 symmetric integration scheme. Simpler and more
@@ -315,34 +314,19 @@ class NoseHoover(nn.Module):
         Returns:
             (traj_x, traj_v): Trajectories of shape (n_stored, ..., dim) or (1, ..., dim) if final_only
         """
-        x = x0
         v = v0 if v0 is not None else torch.randn_like(x0) * torch.sqrt(self.kT / self.mass)
         alpha = torch.zeros(x0.shape[:-1], device=x0.device, dtype=x0.dtype)
         
-        if final_only:
-            # Only run to final state, no trajectory storage
-            for i in range(n_steps):
-                x, v, alpha = self.step(x, v, alpha, force_fn, dt)
-            return x.unsqueeze(0), v.unsqueeze(0)
+        def step_wrapper(state: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+                        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            x, v, alpha = state
+            return self.step(x, v, alpha, force_fn, dt)
         
-        n_stored = n_steps // store_every + 1
-        traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
-        traj_v = torch.empty((n_stored, *v.shape), dtype=v.dtype, device=v.device)
-        
-        traj_x[0] = x0
-        traj_v[0] = v
-        
-        idx = 1
-        for i in range(1, n_steps + 1):
-            x, v, alpha = self.step(x, v, alpha, force_fn, dt)
-            if i % store_every == 0:
-                traj_x[idx] = x
-                traj_v[idx] = v
-                idx += 1
-        return traj_x, traj_v
+        results = self._run_loop((x0, v, alpha), step_wrapper, n_steps, store_every, final_only)
+        return results[0], results[1]
 
 
-class NoseHooverChain(nn.Module):
+class NoseHooverChain(Integrator):
     """Nosé-Hoover chain thermostat for deterministic canonical sampling.
     
     Extends phase space with thermostat variables to sample NVT ensemble
@@ -435,35 +419,21 @@ class NoseHooverChain(nn.Module):
         Returns:
             (traj_x, traj_v): Trajectories of shape (n_stored, ..., dim) or (1, ..., dim) if final_only
         """
-        x = x0
         v = v0 if v0 is not None else torch.randn_like(x0) * torch.sqrt(self.kT / self.mass)
         ndof = x0.shape[-1]
         xi_shape = x0.shape[:-1] + (self.n_chain,)
         xi = torch.zeros(xi_shape, device=x0.device, dtype=x0.dtype)
         
-        if final_only:
-            for i in range(n_steps):
-                x, v, xi = self.step(x, v, xi, force_fn, dt, ndof)
-            return x.unsqueeze(0), v.unsqueeze(0)
+        def step_wrapper(state: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+                        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            x, v, xi = state
+            return self.step(x, v, xi, force_fn, dt, ndof)
         
-        n_stored = n_steps // store_every + 1
-        traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
-        traj_v = torch.empty((n_stored, *v.shape), dtype=v.dtype, device=v.device)
-        
-        traj_x[0] = x0
-        traj_v[0] = v
-        
-        idx = 1
-        for i in range(1, n_steps + 1):
-            x, v, xi = self.step(x, v, xi, force_fn, dt, ndof)
-            if i % store_every == 0:
-                traj_x[idx] = x
-                traj_v[idx] = v
-                idx += 1
-        return traj_x, traj_v
+        results = self._run_loop((x0, v, xi), step_wrapper, n_steps, store_every, final_only)
+        return results[0], results[1]
 
 
-class ESH(nn.Module):
+class ESH(Integrator):
     """Energy Sampling Hamiltonian dynamics for deterministic ergodic sampling.
     
     Uses non-Newtonian kinetic energy K(v) = d/2 * log(v²/d).
@@ -599,7 +569,6 @@ class ESH(nn.Module):
             (positions, unit_velocities, log_v_magnitudes) each of shape (n_stored, ...) or (1, ...) if final_only
         """
         eps = dt if dt is not None else self.eps
-        x = x0
         
         if u0 is None:
             u = torch.randn_like(x0)
@@ -609,33 +578,15 @@ class ESH(nn.Module):
         
         r = torch.zeros(x0.shape[:-1], device=x0.device, dtype=x0.dtype)
         
-        if final_only:
-            for i in range(n_steps):
-                x, u, r = self.step(x, u, r, grad_fn, eps)
-            return x.unsqueeze(0), u.unsqueeze(0), r.unsqueeze(0)
+        def step_wrapper(state: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+                        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            x, u, r = state
+            return self.step(x, u, r, grad_fn, eps)
         
-        n_stored = n_steps // store_every + 1
-        traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
-        traj_u = torch.empty((n_stored, *u.shape), dtype=u.dtype, device=u.device)
-        traj_r = torch.empty((n_stored, *r.shape), dtype=r.dtype, device=r.device)
-        
-        traj_x[0] = x0
-        traj_u[0] = u
-        traj_r[0] = r
-        
-        idx = 1
-        for i in range(1, n_steps + 1):
-            x, u, r = self.step(x, u, r, grad_fn, eps)
-            if i % store_every == 0:
-                traj_x[idx] = x
-                traj_u[idx] = u
-                traj_r[idx] = r
-                idx += 1
-        
-        return traj_x, traj_u, traj_r
+        return self._run_loop((x0, u, r), step_wrapper, n_steps, store_every, final_only)
 
 
-class GLE(nn.Module):
+class GLE(Integrator):
     """Generalized Langevin Equation with colored noise.
     
     Implements dynamics with memory kernel using Prony series decomposition:
@@ -744,7 +695,6 @@ class GLE(nn.Module):
             (traj_x, traj_v): Trajectories of shape (n_stored, ..., dim) or (1, ..., dim) if final_only
         """
         device, dtype = x0.device, x0.dtype
-        x = x0
         
         # Ensure parameters are on correct device
         kT = self.kT.to(device)
@@ -757,27 +707,13 @@ class GLE(nn.Module):
         s_shape = x0.shape + (self.n_modes,)
         s = torch.randn(s_shape, device=device, dtype=dtype) * torch.sqrt(c * kT)
         
-        if final_only:
-            for i in range(n_steps):
-                x, v, s = self.step(x, v, s, force_fn, dt)
-            return x.unsqueeze(0), v.unsqueeze(0)
+        def step_wrapper(state: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+                        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            x, v, s = state
+            return self.step(x, v, s, force_fn, dt)
         
-        n_stored = n_steps // store_every + 1
-        traj_x = torch.empty((n_stored, *x0.shape), dtype=dtype, device=device)
-        traj_v = torch.empty((n_stored, *v.shape), dtype=dtype, device=device)
-        
-        traj_x[0] = x0
-        traj_v[0] = v
-        
-        idx = 1
-        for i in range(1, n_steps + 1):
-            x, v, s = self.step(x, v, s, force_fn, dt)
-            if i % store_every == 0:
-                traj_x[idx] = x
-                traj_v[idx] = v
-                idx += 1
-        
-        return traj_x, traj_v
+        results = self._run_loop((x0, v, s), step_wrapper, n_steps, store_every, final_only)
+        return results[0], results[1]
 
 
 def kinetic_energy(v: torch.Tensor, mass: float = 1.0) -> torch.Tensor:
@@ -790,460 +726,3 @@ def temperature(v: torch.Tensor, mass: float = 1.0) -> torch.Tensor:
     ndof = v.shape[-1]
     KE = kinetic_energy(v, mass)
     return 2 * KE / ndof
-
-
-if __name__ == "__main__":
-    import os
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from scipy.stats import gaussian_kde
-    from .potentials import DoubleWell, DoubleWell2D, Harmonic
-    
-    # Plotting style (Nord-inspired, editorial)
-    plt.rcParams.update({
-        "font.family": "monospace",
-        "font.monospace": ["JetBrains Mono", "DejaVu Sans Mono", "Menlo", "Monaco"],
-        "font.size": 11,
-        "axes.titlesize": 12,
-        "axes.labelsize": 11,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
-        "legend.fontsize": 9,
-        "axes.grid": True,
-        "grid.alpha": 0.2,
-        "grid.linewidth": 0.5,
-        "axes.spines.top": False,
-        "axes.spines.right": False,
-        "axes.titlepad": 8.0,
-        "axes.labelpad": 5.0,
-        "xtick.direction": "out",
-        "ytick.direction": "out",
-        "legend.frameon": True,
-        "legend.framealpha": 0.95,
-        "legend.edgecolor": '0.9',
-        "figure.facecolor": "#FAFBFC",
-        "axes.facecolor": "#FFFFFF",
-        "savefig.facecolor": "#FAFBFC",
-        "lines.linewidth": 2.0,
-    })
-
-    assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
-    os.makedirs(assets_dir, exist_ok=True)
-
-    fig, axes = plt.subplots(3, 3, figsize=(15, 12), constrained_layout=True)
-    fig.patch.set_facecolor('#FAFBFC')
-
-    # Color palette
-    COLORS = {
-        'Overdamped': '#5E81AC',   # Steel blue
-        'BAOAB': '#D08770',        # Warm orange
-        'GLE': '#A3BE8C',          # Sage green
-        'NH': '#BF616A',           # Muted red
-        'ESH': '#B48EAD',          # Lavender
-        'Verlet': '#4C566A',       # Slate gray
-        'NHC': '#88C0D0',          # Cyan
-    }
-    
-    # Setup for 1D double well
-    dw = DoubleWell()
-    kT = 0.5
-    dt = 0.01
-    n_steps = 50000
-    n_batch = 50
-    
-    def force_fn_1d(x):
-        return dw.force(x.unsqueeze(-1)).squeeze(-1)
-        
-    def add_1d_density_inset(ax, samples, potential, kT, color, label=''):
-        # Inset for 1D density
-        ax_ins = ax.inset_axes([0.65, 0.65, 0.3, 0.3])
-        
-        # Empirical density (histogram)
-        ax_ins.hist(samples, bins=40, density=True, range=(-2.5, 2.5),
-                   color=color, alpha=0.6, edgecolor='none')
-        
-        # Theoretical density
-        x_th = torch.linspace(-2.5, 2.5, 200)
-        u_th = potential.energy(x_th)
-        p_th = torch.exp(-u_th / kT)
-        p_th = p_th / (p_th.sum() * (x_th[1] - x_th[0]))
-        ax_ins.plot(x_th.numpy(), p_th.detach().numpy(), 'k-', lw=1.5, alpha=0.8)
-        
-        ax_ins.set_xticks([])
-        ax_ins.set_yticks([])
-        ax_ins.set_facecolor('none')
-        for spine in ax_ins.spines.values():
-            spine.set_visible(False)
-    
-    # 1. Overdamped Langevin
-    ax = axes[0, 0]
-    integrator = OverdampedLangevin(gamma=1.0, kT=kT)
-    x0 = torch.full((n_batch,), -1.0)
-    traj_od = integrator.run(x0, force_fn_1d, dt, n_steps, store_every=10)
-    t = np.arange(traj_od.shape[0]) * dt * 10
-    for i in range(min(3, n_batch)):
-        ax.plot(t, traj_od[:, i].detach().numpy(), alpha=0.75, lw=1.8, color=COLORS['Overdamped'])
-    ax.axhline(1, color='gray', ls='--', alpha=0.6, lw=1.5)
-    ax.axhline(-1, color='gray', ls='--', alpha=0.6, lw=1.5)
-    ax.set_xlabel('Time')
-    ax.set_ylabel('x')
-    ax.set_title('Overdamped Langevin', fontweight='bold')
-    ax.set_axisbelow(True)
-    # Add density inset
-    burn_in = 2000
-    samples_od = traj_od[burn_in//10:].flatten().detach().numpy()
-    add_1d_density_inset(ax, samples_od, dw, kT, COLORS['Overdamped'])
-    
-    # 2. BAOAB
-    ax = axes[0, 1]
-    integrator = BAOAB(gamma=1.0, kT=kT, mass=1.0)
-    traj_baoab, _ = integrator.run(x0, None, force_fn_1d, dt, n_steps, store_every=10)
-    for i in range(min(3, n_batch)):
-        ax.plot(t, traj_baoab[:, i].detach().numpy(), alpha=0.75, lw=1.8, color=COLORS['BAOAB'])
-    ax.axhline(1, color='gray', ls='--', alpha=0.6, lw=1.5)
-    ax.axhline(-1, color='gray', ls='--', alpha=0.6, lw=1.5)
-    ax.set_xlabel('Time')
-    ax.set_ylabel('x')
-    ax.set_title('BAOAB', fontweight='bold')
-    ax.set_axisbelow(True)
-    # Add density inset
-    samples_baoab = traj_baoab[burn_in//10:].flatten().detach().numpy()
-    add_1d_density_inset(ax, samples_baoab, dw, kT, COLORS['BAOAB'])
-    
-    # 3. GLE (colored noise)
-    ax = axes[0, 2]
-    gle = GLE(kT=kT, mass=1.0, gamma=[0.5, 2.0], c=[0.3, 1.0])
-    traj_gle, _ = gle.run(x0, None, force_fn_1d, dt, n_steps, store_every=10)
-    for i in range(min(3, n_batch)):
-        ax.plot(t, traj_gle[:, i].detach().numpy(), alpha=0.75, lw=1.8, color=COLORS['GLE'])
-    ax.axhline(1, color='gray', ls='--', alpha=0.6, lw=1.5)
-    ax.axhline(-1, color='gray', ls='--', alpha=0.6, lw=1.5)
-    ax.set_xlabel('Time')
-    ax.set_ylabel('x')
-    ax.set_title('GLE (colored noise)', fontweight='bold')
-    ax.set_axisbelow(True)
-    # Add density inset
-    samples_gle = traj_gle[burn_in//10:].flatten().detach().numpy()
-    add_1d_density_inset(ax, samples_gle, dw, kT, COLORS['GLE'])
-    
-    # 4. 2D Double Well Sampling (Row 2)
-    # Use DoubleWell2D instead of Harmonic
-    dw2d = DoubleWell2D(barrier_height=1.0, k_y=1.0)
-    kT_2d = 0.5 # Lower temperature to see hopping
-    
-    def grad_dw2d(x):
-        return -dw2d.force(x)
-    
-    # Prepare background contours
-    x_grid = torch.linspace(-2.0, 2.0, 100)
-    y_grid = torch.linspace(-2.0, 2.0, 100)
-    X, Y = torch.meshgrid(x_grid, y_grid, indexing='ij')
-    xy_grid = torch.stack([X, Y], dim=-1)
-    U_grid = dw2d.energy(xy_grid)
-    
-    # Helper for 2D KDE insets
-    def add_2d_kde_inset(ax, samples, weights=None, color_map='Blues'):
-        ax_ins = ax.inset_axes([0.65, 0.65, 0.3, 0.3])
-        
-        # Kernel Density Estimation
-        try:
-            # Subsample for KDE if too large
-            if len(samples) > 5000:
-                idx = np.random.choice(len(samples), 5000, p=weights if weights is not None else None, replace=False)
-                kde_samples = samples[idx]
-                kde_weights = weights[idx] if weights is not None else None
-            else:
-                kde_samples = samples
-                kde_weights = weights
-                
-            x = kde_samples[:, 0]
-            y = kde_samples[:, 1]
-            
-            # Create grid for KDE evaluation
-            xmin, xmax = -2.0, 2.0
-            ymin, ymax = -2.0, 2.0
-            xx, yy = np.mgrid[xmin:xmax:50j, ymin:ymax:50j]
-            positions = np.vstack([xx.ravel(), yy.ravel()])
-            values = np.vstack([x, y])
-            
-            kernel = gaussian_kde(values, weights=kde_weights)
-            f = np.reshape(kernel(positions).T, xx.shape)
-            
-            ax_ins.contourf(xx, yy, f, cmap=color_map, levels=10)
-            ax_ins.set_xlim(xmin, xmax)
-            ax_ins.set_ylim(ymin, ymax)
-        except Exception:
-            # Fallback if KDE fails (e.g. singular matrix)
-            pass
-            
-        ax_ins.set_xticks([])
-        ax_ins.set_yticks([])
-        ax_ins.set_facecolor('white')
-        for spine in ax_ins.spines.values():
-            spine.set_visible(True) # Keep box for 2D density
-    
-    # Run samplers on 2D Double Well
-    n_steps_2d = 50000
-    
-    # ESH
-    torch.manual_seed(42)
-    esh = ESH(eps=0.1)
-    x0_esh = torch.randn(20, 2)
-    u0_esh = torch.randn(20, 2)
-    u0_esh = u0_esh / u0_esh.norm(dim=-1, keepdim=True)
-    
-    traj_esh_2d, _, traj_r = esh.run(x0_esh, u0_esh, grad_dw2d, n_steps=n_steps_2d, dt=0.1, store_every=1)
-    
-    burn_in = 5000
-    esh_x = traj_esh_2d[burn_in:].detach().numpy()
-    esh_r = traj_r[burn_in:].detach().numpy()
-    esh_weights = np.exp(esh_r)
-    esh_weights = esh_weights / esh_weights.sum()
-    esh_samples = esh_x.reshape(-1, 2)
-    esh_w_flat = esh_weights.flatten()
-    
-    # Nosé-Hoover
-    nh_2d = NoseHoover(kT=kT_2d, mass=1.0, Q=1.0)
-    x0_nh = torch.randn(20, 2)
-    traj_nh_2d, _ = nh_2d.run(x0_nh, None, dw2d.force, dt=0.05, n_steps=n_steps_2d, store_every=1)
-    nh_samples = traj_nh_2d[5000:].reshape(-1, 2).detach().numpy()
-    
-    # BAOAB
-    baoab_2d = BAOAB(gamma=1.0, kT=kT_2d, mass=1.0)
-    x0_baoab = torch.randn(200, 2) # More chains for baoab to cover space
-    traj_baoab_2d, _ = baoab_2d.run(x0_baoab, None, dw2d.force, dt=0.05, n_steps=10000, store_every=10)
-    baoab_samples = traj_baoab_2d[100:].reshape(-1, 2).detach().numpy()
-    
-    # Plotting 2D
-    # ESH
-    ax = axes[1, 0]
-    ax.contour(X.numpy(), Y.numpy(), U_grid.detach().numpy(), levels=np.linspace(0, 5, 10), colors='k', alpha=0.2)
-    
-    # Importance resampling for scatter
-    esh_idx = np.random.choice(len(esh_samples), size=5000, p=esh_w_flat)
-    ax.scatter(esh_samples[esh_idx, 0], esh_samples[esh_idx, 1], s=5, alpha=0.3, 
-               c=COLORS['ESH'], edgecolors='none')
-               
-    ax.set_title('ESH (2D Double Well)', fontweight='bold')
-    ax.set_aspect('equal')
-    ax.set_xlim(-2.5, 2.5); ax.set_ylim(-2.5, 2.5)
-    add_2d_kde_inset(ax, esh_samples, esh_w_flat, color_map='Purples')
-    
-    # NH
-    ax = axes[1, 1]
-    ax.contour(X.numpy(), Y.numpy(), U_grid.detach().numpy(), levels=np.linspace(0, 5, 10), colors='k', alpha=0.2)
-    ax.scatter(nh_samples[::10, 0], nh_samples[::10, 1], s=5, alpha=0.3,
-               c=COLORS['NH'], edgecolors='none')
-    ax.set_title('Nosé-Hoover (2D Double Well)', fontweight='bold')
-    ax.set_aspect('equal')
-    ax.set_xlim(-2.5, 2.5); ax.set_ylim(-2.5, 2.5)
-    add_2d_kde_inset(ax, nh_samples, None, color_map='Reds')
-    
-    # BAOAB
-    ax = axes[1, 2]
-    ax.contour(X.numpy(), Y.numpy(), U_grid.detach().numpy(), levels=np.linspace(0, 5, 10), colors='k', alpha=0.2)
-    ax.scatter(baoab_samples[::2, 0], baoab_samples[::2, 1], s=5, alpha=0.3,
-               c=COLORS['BAOAB'], edgecolors='none')
-    ax.set_title('BAOAB (2D Double Well)', fontweight='bold')
-    ax.set_aspect('equal')
-    ax.set_xlim(-2.5, 2.5); ax.set_ylim(-2.5, 2.5)
-    add_2d_kde_inset(ax, baoab_samples, None, color_map='Oranges')
-    
-    # 7. Benchmark Plot (Forward vs Backward)
-    ax = axes[2, 0]
-    # Spanning all columns in the bottom row
-    ax.remove()
-    ax = axes[2, 1]
-    ax.remove()
-    ax = axes[2, 2]
-    ax.remove()
-    
-    # Create a new axis spanning the bottom row
-    gs = axes[0, 0].get_gridspec()
-    ax_bench = fig.add_subplot(gs[2, :])
-    
-    def run_benchmark_for_plot():
-        # Setup for benchmark
-        dim = 64
-        n_particles = 256
-        n_steps = 100
-        dt = 0.01
-        device = torch.device('cpu')
-        
-        integrators_list = [
-            ("Overdamped", OverdampedLangevin(gamma=1.0, kT=1.0)),
-            ("BAOAB", BAOAB(gamma=1.0, kT=1.0, mass=1.0)),
-            ("Verlet", VelocityVerlet(mass=1.0)),
-            ("NH", NoseHoover(kT=1.0, mass=1.0, Q=1.0)),
-            ("NHC", NoseHooverChain(kT=1.0, mass=1.0, Q=1.0, n_chain=2)),
-            ("ESH", ESH(eps=0.1)),
-            ("GLE", GLE(kT=1.0, mass=1.0, gamma=[1.0, 2.0], c=[1.0, 2.0]))
-        ]
-        
-        fwd_times = []
-        bwd_times = []
-        names = []
-        
-        # Simple Harmonic force
-        def force_fn(x):
-            return -x
-        def grad_fn(x):
-            return x
-            
-        x0 = torch.randn(n_particles, dim, device=device, requires_grad=True)
-        v0 = torch.randn(n_particles, dim, device=device, requires_grad=True)
-        
-        import time
-        
-        for name, integrator in integrators_list:
-            integrator = integrator.to(device)
-            names.append(name)
-            
-            # Helper to run integrator
-            def run_int():
-                if name == "ESH":
-                    return integrator.run(x0, None, grad_fn, n_steps=n_steps)
-                elif name == "Overdamped":
-                    return integrator.run(x0, force_fn, dt=dt, n_steps=n_steps)
-                elif name == "Verlet":
-                    return integrator.run(x0, v0, force_fn, dt=dt, n_steps=n_steps)
-                else:
-                    return integrator.run(x0, None, force_fn, dt=dt, n_steps=n_steps)
-
-            # Warmup
-            try:
-                run_int()
-            except Exception:
-                pass
-                
-            # Forward
-            torch.cuda.synchronize() if device.type == 'cuda' else None
-            t0 = time.perf_counter()
-            out = run_int()
-            torch.cuda.synchronize() if device.type == 'cuda' else None
-            t_fwd = time.perf_counter() - t0
-            fwd_times.append(t_fwd)
-            
-            # Backward
-            if isinstance(out, tuple):
-                loss = out[0].sum()
-            else:
-                loss = out.sum()
-            
-            # Reset gradients
-            if x0.grad is not None: x0.grad.zero_()
-            if v0.grad is not None: v0.grad.zero_()
-            for p in integrator.parameters():
-                if p.grad is not None: p.grad.zero_()
-                
-            t0 = time.perf_counter()
-            loss.backward()
-            torch.cuda.synchronize() if device.type == 'cuda' else None
-            t_bwd = time.perf_counter() - t0
-            bwd_times.append(t_bwd)
-            
-        return names, fwd_times, bwd_times
-
-    names, fwd_times, bwd_times = run_benchmark_for_plot()
-    
-    # Bar plot
-    x = np.arange(len(names))
-    width = 0.35
-    
-    rects1 = ax_bench.bar(x - width/2, fwd_times, width, label='Forward (Execution)', color=COLORS['Overdamped'], alpha=0.8)
-    rects2 = ax_bench.bar(x + width/2, bwd_times, width, label='Backward (Gradient)', color=COLORS['BAOAB'], alpha=0.8)
-    
-    ax_bench.set_ylabel('Time (s)')
-    ax_bench.set_title('Performance Benchmark (100 steps, batch=256, dim=64)', fontweight='bold')
-    ax_bench.set_xticks(x)
-    ax_bench.set_xticklabels(names)
-    ax_bench.legend()
-    ax_bench.set_axisbelow(True)
-    ax_bench.grid(axis='y', alpha=0.3)
-    
-    plt.savefig(os.path.join(assets_dir, "integrators.png"), dpi=150, 
-                bbox_inches='tight', facecolor='#FAFBFC')
-    import time
-    import tracemalloc
-
-    def benchmark_integrators():
-        print("\n" + "="*60)
-        print(f"{'Integrator':<20} | {'Time (s)':<10} | {'Steps/sec':<10} | {'Peak Mem (MB)':<12}")
-        print("-" * 60)
-        
-        # Benchmark setup
-        dim = 100
-        n_particles = 1000
-        n_steps = 1000
-        dt = 0.01
-        device = torch.device('cpu')
-        
-        # Simple Harmonic force for benchmarking
-        def force_fn(x):
-            return -x
-            
-        def grad_fn(x):
-            return x
-
-        x0 = torch.randn(n_particles, dim, device=device)
-        v0 = torch.randn(n_particles, dim, device=device)
-        
-        integrators = [
-            ("OverdampedLangevin", OverdampedLangevin(gamma=1.0, kT=1.0)),
-            ("BAOAB", BAOAB(gamma=1.0, kT=1.0, mass=1.0)),
-            ("VelocityVerlet", VelocityVerlet(mass=1.0)),
-            ("NoseHoover", NoseHoover(kT=1.0, mass=1.0, Q=1.0)),
-            ("NoseHooverChain", NoseHooverChain(kT=1.0, mass=1.0, Q=1.0, n_chain=2)),
-            ("ESH", ESH(eps=0.1)),
-            ("GLE", GLE(kT=1.0, mass=1.0, gamma=[1.0, 2.0], c=[1.0, 2.0]))
-        ]
-        
-        for name, integrator in integrators:
-            integrator = integrator.to(device)
-            
-            # Helper to run integrator with correct signature
-            def run_int(steps, use_warmup_slice=False):
-                current_x0 = x0[:10] if use_warmup_slice else x0
-                current_v0 = v0[:10] if use_warmup_slice else v0
-                
-                if name == "ESH":
-                    integrator.run(current_x0, None, grad_fn, n_steps=steps)
-                elif name == "OverdampedLangevin":
-                    integrator.run(current_x0, force_fn, dt=dt, n_steps=steps)
-                elif name == "VelocityVerlet":
-                    # VelocityVerlet requires explicit v0
-                    integrator.run(current_x0, current_v0, force_fn, dt=dt, n_steps=steps)
-                else:
-                    integrator.run(current_x0, None, force_fn, dt=dt, n_steps=steps)
-
-            # Warmup
-            try:
-                run_int(10, use_warmup_slice=True)
-            except Exception as e:
-                print(f"Failed warmup for {name}: {e}")
-                continue
-            
-            # Reset memory tracking
-            tracemalloc.start()
-            tracemalloc.clear_traces()
-            start_mem = tracemalloc.get_traced_memory()[0]
-            
-            start_time = time.perf_counter()
-            
-            # Run benchmark
-            run_int(n_steps, use_warmup_slice=False)
-                
-            end_time = time.perf_counter()
-            _, peak_mem = tracemalloc.get_traced_memory()
-            tracemalloc.stop()
-            
-            duration = end_time - start_time
-            # Metric: particles * steps / second
-            throughput = (n_steps * n_particles) / duration
-            mem_usage = (peak_mem - start_mem) / 1024 / 1024  # MB
-            
-            print(f"{name:<20} | {duration:<10.4f} | {throughput:<10.0f} | {mem_usage:<12.2f}")
-            
-        print("="*60 + "\n")
-
-    benchmark_integrators()
