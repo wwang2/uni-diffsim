@@ -11,6 +11,7 @@ from .gradient_estimators import (
     ImplicitDiffEstimator,
     reinforce_gradient,
     CheckpointManager, CheckpointedNoseHoover, ContinuousAdjointNoseHoover,
+    DiscreteAdjointNoseHoover, ForwardSensitivityEstimator
 )
 
 __version__ = "0.1.0"
@@ -28,4 +29,5 @@ __all__ = [
     "reinforce_gradient",
     # Adjoint Methods
     "CheckpointManager", "CheckpointedNoseHoover", "ContinuousAdjointNoseHoover",
+    "DiscreteAdjointNoseHoover", "ForwardSensitivityEstimator",
 ]

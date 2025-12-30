@@ -91,6 +91,36 @@ grads = integrator.adjoint_backward([loss_grad], [None], traj_x, traj_v, traj_al
 python scripts/nosehoover_adjoint_demo.py  # Generate the adjoint comparison plot
 ```
 
+## Forward-Mode Sensitivity Analysis
+
+![Gradient Method Benchmark](assets/grad_method_benchmark.png)
+
+Comparison of forward-mode AD against reverse-mode methods for computing parameter sensitivities:
+
+| Method | Memory | Time | Notes |
+|--------|--------|------|-------|
+| **BPTT** | O(T) | Fast | Reverse-mode, stores full trajectory |
+| **Adjoint** | O(√T) | Medium | Reverse-mode with checkpointing |
+| **Forward** | O(1) | Slow | Forward-mode AD (JVP), O(P) passes for P parameters |
+
+Forward-mode AD computes sensitivities ∂x_T/∂θ by propagating tangent vectors alongside the trajectory. Memory is independent of trajectory length T, but requires one pass per parameter.
+
+```python
+from uni_diffsim import NoseHoover
+from uni_diffsim.gradient_estimators import ForwardSensitivityEstimator
+
+integrator = NoseHoover(kT=1.0, mass=1.0, Q=1.0)
+estimator = ForwardSensitivityEstimator(integrator, param_names=['kT'])
+
+# Compute trajectory and sensitivities in one forward pass
+(traj_x, traj_v), jac = estimator.forward_sensitivity(x0, v0, force_fn, dt=0.01, n_steps=1000)
+# jac[0]['kT'] contains ∂x/∂kT at each timestep
+```
+
+```bash
+python scripts/compare_gradients.py  # Generate the benchmark plot
+```
+
 ## Potentials
 
 ![Potentials](assets/potentials.png)

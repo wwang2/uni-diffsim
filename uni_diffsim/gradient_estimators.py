@@ -28,6 +28,7 @@ Disadvantages:
 
 import torch
 import torch.nn as nn
+from torch.func import functional_call, jvp, vmap
 from typing import Callable, Tuple, Optional, Union, Dict, List
 import gc
 import math
@@ -951,7 +952,7 @@ class NoseHooverCheckpointedFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x0, v0, alpha0, kT, mass, Q, force_fn, dt, n_steps, store_every, checkpoint_mgr):
+    def forward(ctx, x0, v0, alpha0, kT, mass, Q, force_fn, dt, n_steps, store_every, checkpoint_mgr, final_only):
         """Forward pass with checkpointing.
 
         Args:
@@ -963,9 +964,10 @@ class NoseHooverCheckpointedFunction(torch.autograd.Function):
             n_steps: Number of steps
             store_every: Store trajectory every N steps
             checkpoint_mgr: CheckpointManager instance
+            final_only: If True, only return final state (O(√T) memory)
 
         Returns:
-            (traj_x, traj_v): Stored trajectory
+            (traj_x, traj_v): Stored trajectory or final state
         """
         # Import here to avoid circular dependency
         from .integrators import NoseHoover
@@ -976,6 +978,7 @@ class NoseHooverCheckpointedFunction(torch.autograd.Function):
         ctx.n_steps = n_steps
         ctx.store_every = store_every
         ctx.checkpoint_mgr = checkpoint_mgr
+        ctx.final_only = final_only
         ctx.save_for_backward(x0, v0, alpha0, kT, mass, Q)
 
         # Forward integration with checkpointing (no gradients needed)
@@ -986,29 +989,41 @@ class NoseHooverCheckpointedFunction(torch.autograd.Function):
             # Forward integration
             x, v, alpha = x0, v0, alpha0
 
-            n_stored = n_steps // store_every + 1
-            traj_x_no_grad = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
-            traj_v_no_grad = torch.empty((n_stored, *v0.shape), dtype=v0.dtype, device=v0.device)
-
-            traj_x_no_grad[0] = x0
-            traj_v_no_grad[0] = v0
-
             # Save initial checkpoint
             checkpoint_mgr.save_checkpoint(0, x, v, alpha)
 
-            idx = 1
-            for i in range(1, n_steps + 1):
-                x, v, alpha = integrator.step(x, v, alpha, force_fn, dt)
+            if final_only:
+                # O(√T) memory mode: only store checkpoints, return final state
+                for i in range(1, n_steps + 1):
+                    x, v, alpha = integrator.step(x, v, alpha, force_fn, dt)
+                    if checkpoint_mgr.should_checkpoint(i):
+                        checkpoint_mgr.save_checkpoint(i, x, v, alpha)
+                
+                # Return final state only (shape: (1, *x0.shape))
+                traj_x_no_grad = x.unsqueeze(0)
+                traj_v_no_grad = v.unsqueeze(0)
+            else:
+                # Full trajectory mode: O(T) memory
+                n_stored = n_steps // store_every + 1
+                traj_x_no_grad = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
+                traj_v_no_grad = torch.empty((n_stored, *v0.shape), dtype=v0.dtype, device=v0.device)
 
-                # Save checkpoint if needed
-                if checkpoint_mgr.should_checkpoint(i):
-                    checkpoint_mgr.save_checkpoint(i, x, v, alpha)
+                traj_x_no_grad[0] = x0
+                traj_v_no_grad[0] = v0
 
-                # Store trajectory
-                if i % store_every == 0:
-                    traj_x_no_grad[idx] = x
-                    traj_v_no_grad[idx] = v
-                    idx += 1
+                idx = 1
+                for i in range(1, n_steps + 1):
+                    x, v, alpha = integrator.step(x, v, alpha, force_fn, dt)
+
+                    # Save checkpoint if needed
+                    if checkpoint_mgr.should_checkpoint(i):
+                        checkpoint_mgr.save_checkpoint(i, x, v, alpha)
+
+                    # Store trajectory
+                    if i % store_every == 0:
+                        traj_x_no_grad[idx] = x
+                        traj_v_no_grad[idx] = v
+                        idx += 1
 
         # Create output tensors that are connected to parameters
         # This ensures backward will be called
@@ -1142,8 +1157,8 @@ class NoseHooverCheckpointedFunction(torch.autograd.Function):
                 grad_Q += grads[5]
 
         # Return gradients (match forward signature)
-        # (x0, v0, alpha0, kT, mass, Q, force_fn, dt, n_steps, store_every, checkpoint_mgr)
-        return lambda_x, lambda_v, lambda_alpha, grad_kT, grad_mass, grad_Q, None, None, None, None, None
+        # (x0, v0, alpha0, kT, mass, Q, force_fn, dt, n_steps, store_every, checkpoint_mgr, final_only)
+        return lambda_x, lambda_v, lambda_alpha, grad_kT, grad_mass, grad_Q, None, None, None, None, None, None
 
 
 class CheckpointedNoseHoover(nn.Module):
@@ -1201,7 +1216,8 @@ class CheckpointedNoseHoover(nn.Module):
 
     def run(self, x0: torch.Tensor, v0: Optional[torch.Tensor],
             force_fn: Callable[[torch.Tensor], torch.Tensor],
-            dt: float, n_steps: int, store_every: int = 1
+            dt: float, n_steps: int, store_every: int = 1,
+            final_only: bool = False
             ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Run trajectory with checkpointing for O(√T) memory backward pass.
 
@@ -1212,9 +1228,11 @@ class CheckpointedNoseHoover(nn.Module):
             dt: Time step
             n_steps: Number of integration steps
             store_every: Store trajectory every N steps
+            final_only: If True, only return final state for O(√T) memory. 
+                       If False, return full trajectory (O(T) memory for trajectory storage).
 
         Returns:
-            (traj_x, traj_v): Trajectories of shape (n_stored, ..., dim)
+            (traj_x, traj_v): Trajectories of shape (n_stored, ..., dim) or (1, ..., dim) if final_only
         """
         if v0 is None:
             v0 = torch.randn_like(x0) * torch.sqrt(self.kT / self.mass)
@@ -1228,7 +1246,7 @@ class CheckpointedNoseHoover(nn.Module):
         # Run forward with checkpointing (uses custom autograd function)
         traj_x, traj_v = NoseHooverCheckpointedFunction.apply(
             x0, v0, alpha0, self.kT, self.mass, self.Q,
-            force_fn, dt, n_steps, store_every, checkpoint_mgr
+            force_fn, dt, n_steps, store_every, checkpoint_mgr, final_only
         )
 
         return traj_x, traj_v
@@ -1722,6 +1740,162 @@ class DiscreteAdjointNoseHoover(nn.Module):
             'kT': grad_kT, 'mass': grad_mass, 'Q': grad_Q,
             'x0': lambda_x, 'v0': lambda_v, 'alpha0': lambda_alpha
         }
+
+
+
+class ForwardSensitivityEstimator(nn.Module):
+    """Forward mode sensitivity estimator using torch.func (Jacobian-Vector Products).
+
+    Computes full Jacobians of the simulation trajectory w.r.t. parameters using
+    Forward Mode AD. This is memory-efficient O(P) where P is the number of parameters,
+    independent of trajectory length T (unlike BPTT which is O(T) memory).
+
+    This method propagates sensitivities forward in time alongside the state,
+    avoiding the need to store the entire history for backpropagation.
+
+    Ideal for:
+    - Sensitivity analysis (how x_t changes with θ)
+    - Optimization with few parameters and long trajectories
+    - Real-time gradient computation
+
+    Args:
+        integrator: The integrator instance (nn.Module).
+        param_names: List of parameter names to differentiate w.r.t.
+    """
+    def __init__(self, integrator: nn.Module, param_names: List[str]):
+        super().__init__()
+        self.integrator = integrator
+        self.param_names = param_names
+
+    def forward_sensitivity(self, *args, **kwargs) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Run simulation and compute sensitivity (Jacobian) w.r.t parameters.
+
+        This implementation uses jacfwd on the entire run, which is convenient 
+        but memory-intensive for long trajectories.
+        """
+        from torch.func import jacfwd
+
+        params = dict(self.integrator.named_parameters())
+        target_params = {k: params[k] for k in self.param_names if k in params}
+        
+        if not target_params:
+            raise ValueError(f"No target parameters found in integrator: {self.param_names}")
+        
+        other_params = {k: v for k, v in params.items() if k not in target_params}
+
+        def wrapper(p_subset):
+            full_params = {**other_params, **p_subset}
+            return functional_call(self.integrator, full_params, args=args, kwargs=kwargs, strict=False)
+
+        jac_output = jacfwd(wrapper)(target_params)
+        
+        with torch.no_grad():
+             if hasattr(self.integrator, 'forward'):
+                 primal = self.integrator(*args, **kwargs)
+             else:
+                 primal = self.integrator.run(*args, **kwargs)
+                 
+        return primal, jac_output
+
+    def forward_sensitivity_online(self, x0: torch.Tensor, v0: Optional[torch.Tensor], 
+                                 force_fn: Callable, dt: float, n_steps: int, 
+                                 store_every: int = 1) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Optimized online forward sensitivity propagation.
+        
+        Propagates sensitivities (Jacobian-Vector Products) step-by-step.
+        This is significantly more memory-efficient than full-trajectory AD
+        and avoids the overhead of tracing a long loop.
+        
+        Memory: O(P * D) - strictly independent of T.
+        """
+        from torch.func import jvp, vmap, functional_call
+        
+        params = dict(self.integrator.named_parameters())
+        target_names = [k for k in self.param_names if k in params]
+        target_params = {k: params[k] for k in target_names}
+        other_params = {k: v for k, v in params.items() if k not in target_params}
+        
+        # 1. Define the step function
+        # We need a function that takes target_params and returns next state
+        def step_func(p_target, state_tuple):
+            p_full = {**other_params, **p_target}
+            # Unpack state
+            if len(state_tuple) == 3: # NoseHoover (x, v, alpha)
+                x, v, alpha = state_tuple
+                return functional_call(self.integrator, p_full, (x, v, alpha, force_fn, dt))
+            else: # Standard (x, v)
+                x, v = state_tuple
+                return functional_call(self.integrator, p_full, (x, v, force_fn, dt))
+
+        # 2. Setup for parallel sensitivity propagation
+        # We use a flattened view for the basis
+        flat_params = torch.cat([p.view(-1) for p in target_params.values()])
+        n_params = flat_params.numel()
+        
+        # Initial state
+        state = (x0, v0) if v0 is not None else (x0,)
+
+        # Jacobians: initialized to zero
+        # Sensitivities have shape (n_params, *state_shape)
+        state_jacs = tuple(torch.zeros(n_params, *s.shape, device=s.device, dtype=s.dtype) for s in state)
+
+        # Flattened basis: (n_params, target_params_dict)
+        # This allows us to vmap over the parameter dimension
+        def get_tangent_dict(idx):
+            d = {}
+            curr = 0
+            for k, p in target_params.items():
+                size = p.numel()
+                t = torch.zeros_like(p)
+                if idx >= curr and idx < curr + size:
+                    t.view(-1)[idx - curr] = 1.0
+                d[k] = t
+                curr += size
+            return d
+
+        # 3. Propagation Loop
+        # J_next = JVP(step, (params, state), (param_tangent, J_curr))
+        
+        curr_state = state
+        curr_jacs = state_jacs
+        
+        # Result storage
+        n_stored = n_steps // store_every + 1
+        traj_states = tuple(torch.empty((n_stored, *s.shape), device=s.device) for s in state)
+        for i, s in enumerate(curr_state): traj_states[i][0] = s
+        
+        for step_idx in range(1, n_steps + 1):
+            # Propagate all n_params sensitivities in parallel using vmap(jvp)
+            def jvp_wrapper(idx):
+                p_tangent = get_tangent_dict(idx)
+                state_tangent = tuple(j[idx] for j in curr_jacs)
+                return jvp(step_func, (target_params, curr_state), (p_tangent, state_tangent))
+            
+            # This computes (new_state, new_jacs)
+            res = vmap(jvp_wrapper)(torch.arange(n_params, device=x0.device))
+            
+            # res structure: ( (new_x, new_v), (jac_x, jac_v) )
+            new_state_all = res[0]
+            new_jacs = res[1]
+            
+            curr_state = tuple(s[0] for s in new_state_all)
+            curr_jacs = new_jacs
+            
+            if step_idx % store_every == 0:
+                idx = step_idx // store_every
+                for i, s in enumerate(curr_state): traj_states[i][idx] = s
+
+        # 4. Format output Jacobians (Final state only for performance)
+        final_jacs = {}
+        curr = 0
+        for k, p in target_params.items():
+            size = p.numel()
+            j = curr_jacs[0][curr:curr+size] # Position jacobian
+            final_jacs[k] = j.movedim(0, -1).reshape(*x0.shape, *p.shape)
+            curr += size
+            
+        return traj_states[0], final_jacs
+
 
 
 if __name__ == "__main__":
