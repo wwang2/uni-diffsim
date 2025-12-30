@@ -1073,57 +1073,60 @@ class NoseHooverCheckpointedFunction(torch.autograd.Function):
                 traj_idx -= 1
 
             # Compute adjoint step: propagate adjoints backward through one step
-            # Enable gradients for state and parameters
-            x_grad = x.detach().requires_grad_(True)
-            v_grad = v.detach().requires_grad_(True)
-            alpha_grad = alpha.detach().requires_grad_(True)
-            kT_grad = kT.detach().requires_grad_(True)
-            mass_grad = mass.detach().requires_grad_(True)
-            Q_grad = Q.detach().requires_grad_(True)
+            # NOTE: Inside custom autograd backward, grad is disabled by default.
+            # We must enable it to build the computation graph for VJP.
+            with torch.enable_grad():
+                # Enable gradients for state and parameters
+                x_grad = x.detach().requires_grad_(True)
+                v_grad = v.detach().requires_grad_(True)
+                alpha_grad = alpha.detach().requires_grad_(True)
+                kT_grad = kT.detach().requires_grad_(True)
+                mass_grad = mass.detach().requires_grad_(True)
+                Q_grad = Q.detach().requires_grad_(True)
 
-            # Manually implement NH step with differentiable parameters
-            # (We can't use NoseHoover class here because we need parameter gradients)
-            ndof = x_grad.shape[-1]
+                # Manually implement NH step with differentiable parameters
+                # (We can't use NoseHoover class here because we need parameter gradients)
+                ndof = x_grad.shape[-1]
 
-            # First thermostat half-step
-            v2 = (v_grad**2).sum(dim=-1)
-            alpha_new = alpha_grad + (dt / 4) * (v2 / kT_grad - ndof)
-            v_new = v_grad * torch.exp(-alpha_new.unsqueeze(-1) * dt / 2)
-            v2 = (v_new**2).sum(dim=-1)
-            alpha_new = alpha_new + (dt / 4) * (v2 / kT_grad - ndof)
+                # First thermostat half-step
+                v2 = (v_grad**2).sum(dim=-1)
+                alpha_new = alpha_grad + (dt / 4) * (v2 / kT_grad - ndof)
+                v_new = v_grad * torch.exp(-alpha_new.unsqueeze(-1) * dt / 2)
+                v2 = (v_new**2).sum(dim=-1)
+                alpha_new = alpha_new + (dt / 4) * (v2 / kT_grad - ndof)
 
-            # Velocity-Verlet for physical degrees of freedom
-            v_new = v_new + (dt / 2) * force_fn(x_grad) / mass_grad
-            x_new = x_grad + dt * v_new
-            v_new = v_new + (dt / 2) * force_fn(x_new) / mass_grad
+                # Velocity-Verlet for physical degrees of freedom
+                v_new = v_new + (dt / 2) * force_fn(x_grad) / mass_grad
+                x_new = x_grad + dt * v_new
+                v_new = v_new + (dt / 2) * force_fn(x_new) / mass_grad
 
-            # Second thermostat half-step
-            v2 = (v_new**2).sum(dim=-1)
-            alpha_new = alpha_new + (dt / 4) * (v2 / kT_grad - ndof)
-            v_new = v_new * torch.exp(-alpha_new.unsqueeze(-1) * dt / 2)
-            v2 = (v_new**2).sum(dim=-1)
-            alpha_new = alpha_new + (dt / 4) * (v2 / kT_grad - ndof)
+                # Second thermostat half-step
+                v2 = (v_new**2).sum(dim=-1)
+                alpha_new = alpha_new + (dt / 4) * (v2 / kT_grad - ndof)
+                v_new = v_new * torch.exp(-alpha_new.unsqueeze(-1) * dt / 2)
+                v2 = (v_new**2).sum(dim=-1)
+                alpha_new = alpha_new + (dt / 4) * (v2 / kT_grad - ndof)
 
-            x_next, v_next, alpha_next = x_new, v_new, alpha_new
+                x_next, v_next, alpha_next = x_new, v_new, alpha_new
 
-            # Compute vector-Jacobian products (VJPs)
-            # This computes: lambda_{t-1} = lambda_t^T @ J_t
-            # where J_t is Jacobian of step at time t-1
+                # Compute vector-Jacobian products (VJPs)
+                # This computes: lambda_{t-1} = lambda_t^T @ J_t
+                # where J_t is Jacobian of step at time t-1
 
-            # Create dummy loss: <lambda, output>
-            dummy_loss = (
-                (lambda_x * x_next).sum() +
-                (lambda_v * v_next).sum() +
-                (lambda_alpha * alpha_next).sum()
-            )
+                # Create dummy loss: <lambda, output>
+                dummy_loss = (
+                    (lambda_x * x_next).sum() +
+                    (lambda_v * v_next).sum() +
+                    (lambda_alpha * alpha_next).sum()
+                )
 
-            # Compute gradients (VJPs)
-            grads = torch.autograd.grad(
-                dummy_loss,
-                [x_grad, v_grad, alpha_grad, kT_grad, mass_grad, Q_grad],
-                allow_unused=True,
-                retain_graph=False
-            )
+                # Compute gradients (VJPs)
+                grads = torch.autograd.grad(
+                    dummy_loss,
+                    [x_grad, v_grad, alpha_grad, kT_grad, mass_grad, Q_grad],
+                    allow_unused=True,
+                    retain_graph=False
+                )
 
             # Update adjoint variables
             lambda_x = grads[0] if grads[0] is not None else torch.zeros_like(x)
@@ -1351,6 +1354,12 @@ class ContinuousAdjointNoseHoover(nn.Module):
             (new_lambda_x, new_lambda_v, new_lambda_alpha, grad_kT, grad_mass, grad_Q)
         """
         ndof = x.shape[-1]
+        device = x.device
+        
+        # Move parameters to same device as trajectory
+        kT = self.kT.to(device)
+        mass = self.mass.to(device)
+        Q = self.Q.to(device)
 
         # Compute force and its Jacobian w.r.t. x
         x_grad = x.detach().requires_grad_(True)
@@ -1369,8 +1378,8 @@ class ContinuousAdjointNoseHoover(nn.Module):
         # dλ_x/dt = -(∂f/∂x)^T · λ = -(1/m)(∂F/∂x)^T · λ_v
         # dλ_v/dt = -(∂f/∂v)^T · λ = -λ_x + α·λ_v - (2v/Q)·λ_α
         # dλ_α/dt = -(∂f/∂α)^T · λ = v · λ_v
-        dlambda_x_dt = -vjp / self.mass
-        dlambda_v_dt = -lambda_x - lambda_alpha.unsqueeze(-1) * (2 * v / self.Q) + lambda_v * alpha.unsqueeze(-1)
+        dlambda_x_dt = -vjp / mass
+        dlambda_v_dt = -lambda_x - lambda_alpha.unsqueeze(-1) * (2 * v / Q) + lambda_v * alpha.unsqueeze(-1)
         dlambda_alpha_dt = (lambda_v * v).sum(dim=-1)
 
         # Backward Euler update (negative dt for backward integration)
@@ -1383,9 +1392,9 @@ class ContinuousAdjointNoseHoover(nn.Module):
         # ∂(dv/dt)/∂mass = -F(x)/m²
         # ∂(dα/dt)/∂Q = -(v² - ndof·kT)/Q²
         # Sum over all dimensions to get scalar gradients matching parameter shapes
-        grad_kT = -(lambda_alpha * (ndof / self.Q) * dt).sum()
-        grad_mass = -(lambda_v * F / (self.mass ** 2)).sum() * dt
-        grad_Q = -(lambda_alpha * (((v ** 2).sum(dim=-1) - ndof * self.kT) / (self.Q ** 2)) * dt).sum()
+        grad_kT = -(lambda_alpha * (ndof / Q) * dt).sum()
+        grad_mass = -(lambda_v * F / (mass ** 2)).sum() * dt
+        grad_Q = -(lambda_alpha * (((v ** 2).sum(dim=-1) - ndof * kT) / (Q ** 2)) * dt).sum()
 
         return lambda_x_new, lambda_v_new, lambda_alpha_new, grad_kT, grad_mass, grad_Q
 
@@ -1410,20 +1419,22 @@ class ContinuousAdjointNoseHoover(nn.Module):
         T = len(traj_x)
 
         # Pad loss gradients if needed
+        # User typically passes gradients at final timestep, so pad with Nones at the FRONT
         if len(loss_grad_x) < T:
-            loss_grad_x = list(loss_grad_x) + [None] * (T - len(loss_grad_x))
+            loss_grad_x = [None] * (T - len(loss_grad_x)) + list(loss_grad_x)
         if len(loss_grad_v) < T:
-            loss_grad_v = list(loss_grad_v) + [None] * (T - len(loss_grad_v))
+            loss_grad_v = [None] * (T - len(loss_grad_v)) + list(loss_grad_v)
 
         # Initialize adjoint variables from final loss gradients
         lambda_x = loss_grad_x[-1] if loss_grad_x[-1] is not None else torch.zeros_like(traj_x[-1])
         lambda_v = loss_grad_v[-1] if loss_grad_v[-1] is not None else torch.zeros_like(traj_v[-1])
         lambda_alpha = torch.zeros_like(traj_alpha[-1])
 
-        # Accumulate parameter gradients
-        grad_kT = torch.zeros_like(self.kT)
-        grad_mass = torch.zeros_like(self.mass)
-        grad_Q = torch.zeros_like(self.Q)
+        # Accumulate parameter gradients (on same device as trajectory)
+        device = traj_x.device
+        grad_kT = torch.zeros((), device=device, dtype=self.kT.dtype)
+        grad_mass = torch.zeros((), device=device, dtype=self.mass.dtype)
+        grad_Q = torch.zeros((), device=device, dtype=self.Q.dtype)
 
         # Backward integration
         for t in range(T - 1, 0, -1):
@@ -1455,6 +1466,264 @@ class ContinuousAdjointNoseHoover(nn.Module):
         }
 
 
+class DiscreteAdjointNoseHoover(nn.Module):
+    """Nosé-Hoover with discrete adjoint matching Kleinerman 08 scheme.
+    
+    The discrete adjoint differentiates through the exact discrete operations,
+    giving 2nd-order accurate gradients that match BPTT exactly (up to roundoff).
+    
+    The Kleinerman 08 forward scheme is a palindromic/symmetric splitting:
+    
+    Forward step (x, v, α) → (x', v', α'):
+      1. α₁ = α + (dt/4) * (v² - ndof·kT) / Q          [thermostat quarter-step]
+      2. v₁ = v * exp(-α₁ * dt/2)                       [velocity rescale]
+      3. α₂ = α₁ + (dt/4) * (v₁² - ndof·kT) / Q        [thermostat quarter-step]
+      4. v₂ = v₁ + (dt/2) * F(x) / m                    [velocity half-kick]
+      5. x' = x + dt * v₂                               [position full-step]
+      6. v₃ = v₂ + (dt/2) * F(x') / m                   [velocity half-kick]
+      7. α₃ = α₂ + (dt/4) * (v₃² - ndof·kT) / Q        [thermostat quarter-step]
+      8. v₄ = v₃ * exp(-α₃ * dt/2)                      [velocity rescale]
+      9. α' = α₃ + (dt/4) * (v₄² - ndof·kT) / Q        [thermostat quarter-step]
+    
+    The discrete adjoint runs backward through these operations using chain rule.
+    For each operation y = f(x), the adjoint is: λ_x = (∂f/∂x)ᵀ λ_y
+    
+    Args:
+        kT: Thermal energy. Differentiable parameter.
+        mass: Particle mass. Differentiable parameter.
+        Q: Thermostat mass. Differentiable parameter.
+    
+    Example:
+        >>> integrator = DiscreteAdjointNoseHoover(kT=1.0, mass=1.0, Q=1.0)
+        >>> traj_x, traj_v, traj_alpha = integrator.run(x0, v0, force_fn, dt, n_steps)
+        >>> loss_grad_x = 2 * traj_x[-1]  # gradient of x².sum()
+        >>> grads = integrator.adjoint_backward([loss_grad_x], [None], traj_x, traj_v, traj_alpha, force_fn, dt)
+        >>> # grads['kT'], grads['mass'], grads['Q'] match BPTT exactly
+    """
+    
+    def __init__(self, kT: float = 1.0, mass: float = 1.0, Q: float = 1.0):
+        super().__init__()
+        self.kT = nn.Parameter(torch.tensor(kT))
+        self.mass = nn.Parameter(torch.tensor(mass))
+        self.Q = nn.Parameter(torch.tensor(Q))
+    
+    def forward_step(self, x: torch.Tensor, v: torch.Tensor, alpha: torch.Tensor,
+                     force_fn: Callable, dt: float
+                     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Single forward step using Kleinerman 08 scheme."""
+        ndof = x.shape[-1]
+        
+        # Step 1: First thermostat quarter-step
+        v2 = (v**2).sum(dim=-1)
+        alpha1 = alpha + (dt / 4) * (v2 - ndof * self.kT) / self.Q
+        
+        # Step 2: Velocity rescale
+        v1 = v * torch.exp(-alpha1.unsqueeze(-1) * dt / 2)
+        
+        # Step 3: Second thermostat quarter-step
+        v1_2 = (v1**2).sum(dim=-1)
+        alpha2 = alpha1 + (dt / 4) * (v1_2 - ndof * self.kT) / self.Q
+        
+        # Step 4: First velocity half-kick
+        F0 = force_fn(x)
+        v2_vec = v1 + (dt / 2) * F0 / self.mass
+        
+        # Step 5: Position full-step
+        x_new = x + dt * v2_vec
+        
+        # Step 6: Second velocity half-kick
+        F1 = force_fn(x_new)
+        v3 = v2_vec + (dt / 2) * F1 / self.mass
+        
+        # Step 7: Third thermostat quarter-step
+        v3_2 = (v3**2).sum(dim=-1)
+        alpha3 = alpha2 + (dt / 4) * (v3_2 - ndof * self.kT) / self.Q
+        
+        # Step 8: Velocity rescale
+        v4 = v3 * torch.exp(-alpha3.unsqueeze(-1) * dt / 2)
+        
+        # Step 9: Fourth thermostat quarter-step
+        v4_2 = (v4**2).sum(dim=-1)
+        alpha_new = alpha3 + (dt / 4) * (v4_2 - ndof * self.kT) / self.Q
+        
+        return x_new, v4, alpha_new
+    
+    def adjoint_step(self, lambda_x: torch.Tensor, lambda_v: torch.Tensor, 
+                     lambda_alpha: torch.Tensor, x: torch.Tensor, v: torch.Tensor,
+                     alpha: torch.Tensor, force_fn: Callable, dt: float
+                     ) -> Tuple[torch.Tensor, ...]:
+        """One backward step of discrete adjoint.
+        
+        Args:
+            lambda_x, lambda_v, lambda_alpha: Adjoint variables at time t+1
+            x, v, alpha: State at time t (before forward step)
+            force_fn: Force function
+            dt: Time step
+            
+        Returns:
+            (new_lambda_x, new_lambda_v, new_lambda_alpha, grad_kT, grad_mass, grad_Q)
+        """
+        device = x.device
+        ndof = x.shape[-1]
+        
+        # Move parameters to device
+        kT = self.kT.to(device)
+        mass = self.mass.to(device)
+        Q = self.Q.to(device)
+        
+        # === Re-run forward to get intermediate values ===
+        v2 = (v**2).sum(dim=-1)
+        alpha1 = alpha + (dt / 4) * (v2 - ndof * kT) / Q
+        exp_neg_a1 = torch.exp(-alpha1.unsqueeze(-1) * dt / 2)
+        v1 = v * exp_neg_a1
+        v1_2 = (v1**2).sum(dim=-1)
+        alpha2 = alpha1 + (dt / 4) * (v1_2 - ndof * kT) / Q
+        F0 = force_fn(x)
+        v2_vec = v1 + (dt / 2) * F0 / mass
+        x_new = x + dt * v2_vec
+        F1 = force_fn(x_new)
+        v3 = v2_vec + (dt / 2) * F1 / mass
+        v3_2 = (v3**2).sum(dim=-1)
+        alpha3 = alpha2 + (dt / 4) * (v3_2 - ndof * kT) / Q
+        exp_neg_a3 = torch.exp(-alpha3.unsqueeze(-1) * dt / 2)
+        v4 = v3 * exp_neg_a3
+        v4_2 = (v4**2).sum(dim=-1)
+        
+        # === Backward pass through operations in reverse order ===
+        grad_kT = torch.zeros((), device=device, dtype=kT.dtype)
+        grad_mass = torch.zeros((), device=device, dtype=mass.dtype)
+        grad_Q = torch.zeros((), device=device, dtype=Q.dtype)
+        
+        lam_x = lambda_x.clone()
+        lam_v = lambda_v.clone()
+        lam_alpha = lambda_alpha.clone()
+        
+        # Adjoint of Step 9: α' = α₃ + (dt/4)(v₄² - ndof·kT)/Q
+        lam_alpha3 = lam_alpha.clone()
+        lam_v4 = lam_v + lam_alpha.unsqueeze(-1) * (dt / 2) * v4 / Q
+        grad_kT = grad_kT - (lam_alpha * (dt / 4) * ndof / Q).sum()
+        grad_Q = grad_Q - (lam_alpha * (dt / 4) * (v4_2 - ndof * kT) / (Q ** 2)).sum()
+        
+        # Adjoint of Step 8: v₄ = v₃ * exp(-α₃ * dt/2)
+        lam_v3 = lam_v4 * exp_neg_a3
+        lam_alpha3 = lam_alpha3 - (dt / 2) * (lam_v4 * v4).sum(dim=-1)
+        
+        # Adjoint of Step 7: α₃ = α₂ + (dt/4)(v₃² - ndof·kT)/Q
+        lam_alpha2 = lam_alpha3.clone()
+        lam_v3 = lam_v3 + lam_alpha3.unsqueeze(-1) * (dt / 2) * v3 / Q
+        grad_kT = grad_kT - (lam_alpha3 * (dt / 4) * ndof / Q).sum()
+        grad_Q = grad_Q - (lam_alpha3 * (dt / 4) * (v3_2 - ndof * kT) / (Q ** 2)).sum()
+        
+        # Adjoint of Step 6: v₃ = v₂ + (dt/2) * F(x')/m
+        lam_v2 = lam_v3.clone()
+        x_new_grad = x_new.detach().requires_grad_(True)
+        F1_recompute = force_fn(x_new_grad)
+        vjp_x1 = torch.autograd.grad(F1_recompute, x_new_grad, grad_outputs=lam_v3,
+                                      create_graph=False, retain_graph=False)[0]
+        lam_x_from_v = vjp_x1 * (dt / 2) / mass
+        grad_mass = grad_mass - ((lam_v3 * F1).sum() * (dt / 2) / (mass ** 2))
+        
+        # Adjoint of Step 5: x' = x + dt * v₂
+        lam_x_new = lam_x + lam_x_from_v
+        lam_x_0 = lam_x_new.clone()
+        lam_v2 = lam_v2 + dt * lam_x_new
+        
+        # Adjoint of Step 4: v₂ = v₁ + (dt/2) * F(x)/m
+        lam_v1 = lam_v2.clone()
+        x_grad = x.detach().requires_grad_(True)
+        F0_recompute = force_fn(x_grad)
+        vjp_x0 = torch.autograd.grad(F0_recompute, x_grad, grad_outputs=lam_v2,
+                                      create_graph=False, retain_graph=False)[0]
+        lam_x_0 = lam_x_0 + vjp_x0 * (dt / 2) / mass
+        grad_mass = grad_mass - ((lam_v2 * F0).sum() * (dt / 2) / (mass ** 2))
+        
+        # Adjoint of Step 3: α₂ = α₁ + (dt/4)(v₁² - ndof·kT)/Q
+        lam_alpha1 = lam_alpha2.clone()
+        lam_v1 = lam_v1 + lam_alpha2.unsqueeze(-1) * (dt / 2) * v1 / Q
+        grad_kT = grad_kT - (lam_alpha2 * (dt / 4) * ndof / Q).sum()
+        grad_Q = grad_Q - (lam_alpha2 * (dt / 4) * (v1_2 - ndof * kT) / (Q ** 2)).sum()
+        
+        # Adjoint of Step 2: v₁ = v * exp(-α₁ * dt/2)
+        lam_v_0 = lam_v1 * exp_neg_a1
+        lam_alpha1 = lam_alpha1 - (dt / 2) * (lam_v1 * v1).sum(dim=-1)
+        
+        # Adjoint of Step 1: α₁ = α + (dt/4)(v² - ndof·kT)/Q
+        lam_alpha_0 = lam_alpha1.clone()
+        lam_v_0 = lam_v_0 + lam_alpha1.unsqueeze(-1) * (dt / 2) * v / Q
+        grad_kT = grad_kT - (lam_alpha1 * (dt / 4) * ndof / Q).sum()
+        grad_Q = grad_Q - (lam_alpha1 * (dt / 4) * (v2 - ndof * kT) / (Q ** 2)).sum()
+        
+        return lam_x_0, lam_v_0, lam_alpha_0, grad_kT, grad_mass, grad_Q
+    
+    def run(self, x0: torch.Tensor, v0: Optional[torch.Tensor],
+            force_fn: Callable, dt: float, n_steps: int, store_every: int = 1
+            ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run forward trajectory, storing full state for adjoint."""
+        if v0 is None:
+            v0 = torch.randn_like(x0) * torch.sqrt(self.kT / self.mass)
+        
+        x, v = x0, v0
+        alpha = torch.zeros(x0.shape[:-1], device=x0.device, dtype=x0.dtype)
+        
+        n_stored = n_steps // store_every + 1
+        traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
+        traj_v = torch.empty((n_stored, *v0.shape), dtype=v0.dtype, device=v0.device)
+        traj_alpha = torch.empty((n_stored, *alpha.shape), dtype=alpha.dtype, device=alpha.device)
+        
+        traj_x[0], traj_v[0], traj_alpha[0] = x0, v0, alpha
+        
+        idx = 1
+        for i in range(1, n_steps + 1):
+            x, v, alpha = self.forward_step(x, v, alpha, force_fn, dt)
+            if i % store_every == 0:
+                traj_x[idx], traj_v[idx], traj_alpha[idx] = x, v, alpha
+                idx += 1
+        
+        return traj_x, traj_v, traj_alpha
+    
+    def adjoint_backward(self, loss_grad_x: List[Optional[torch.Tensor]],
+                        loss_grad_v: List[Optional[torch.Tensor]],
+                        traj_x: torch.Tensor, traj_v: torch.Tensor,
+                        traj_alpha: torch.Tensor,
+                        force_fn: Callable, dt: float) -> Dict[str, torch.Tensor]:
+        """Backward pass using discrete adjoint (2nd order accurate)."""
+        T = len(traj_x)
+        device = traj_x.device
+        
+        # Pad loss gradients at the FRONT
+        if len(loss_grad_x) < T:
+            loss_grad_x = [None] * (T - len(loss_grad_x)) + list(loss_grad_x)
+        if len(loss_grad_v) < T:
+            loss_grad_v = [None] * (T - len(loss_grad_v)) + list(loss_grad_v)
+        
+        # Initialize adjoint from final loss gradient
+        lambda_x = loss_grad_x[-1] if loss_grad_x[-1] is not None else torch.zeros_like(traj_x[-1])
+        lambda_v = loss_grad_v[-1] if loss_grad_v[-1] is not None else torch.zeros_like(traj_v[-1])
+        lambda_alpha = torch.zeros_like(traj_alpha[-1])
+        
+        grad_kT = torch.zeros((), device=device, dtype=self.kT.dtype)
+        grad_mass = torch.zeros((), device=device, dtype=self.mass.dtype)
+        grad_Q = torch.zeros((), device=device, dtype=self.Q.dtype)
+        
+        for t in range(T - 1, 0, -1):
+            lambda_x, lambda_v, lambda_alpha, d_kT, d_mass, d_Q = self.adjoint_step(
+                lambda_x, lambda_v, lambda_alpha,
+                traj_x[t - 1], traj_v[t - 1], traj_alpha[t - 1],
+                force_fn, dt
+            )
+            grad_kT, grad_mass, grad_Q = grad_kT + d_kT, grad_mass + d_mass, grad_Q + d_Q
+            
+            if loss_grad_x[t - 1] is not None:
+                lambda_x = lambda_x + loss_grad_x[t - 1]
+            if loss_grad_v[t - 1] is not None:
+                lambda_v = lambda_v + loss_grad_v[t - 1]
+        
+        return {
+            'kT': grad_kT, 'mass': grad_mass, 'Q': grad_Q,
+            'x0': lambda_x, 'v0': lambda_v, 'alpha0': lambda_alpha
+        }
+
+
 if __name__ == "__main__":
     """Demo: REINFORCE gradient estimation for equilibrium observables.
 
@@ -1472,32 +1741,32 @@ if __name__ == "__main__":
     from .potentials import Harmonic, DoubleWell, AsymmetricDoubleWell
     from .integrators import OverdampedLangevin, BAOAB
 
-    # Plotting style - clean and modern with larger fonts
+    # Plotting style (Nord-inspired, editorial)
     plt.rcParams.update({
         "font.family": "monospace",
-        "font.monospace": ["DejaVu Sans Mono", "Menlo", "Consolas", "Monaco"],
-        "font.size": 13,
-        "axes.titlesize": 15,
-        "axes.labelsize": 13,
-        "xtick.labelsize": 12,
-        "ytick.labelsize": 12,
-        "legend.fontsize": 11,
+        "font.monospace": ["JetBrains Mono", "DejaVu Sans Mono", "Menlo", "Monaco"],
+        "font.size": 11,
+        "axes.titlesize": 12,
+        "axes.labelsize": 11,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        "legend.fontsize": 9,
         "axes.grid": True,
-        "grid.alpha": 0.25,
-        "grid.linewidth": 0.6,
+        "grid.alpha": 0.2,
+        "grid.linewidth": 0.5,
         "axes.spines.top": False,
         "axes.spines.right": False,
-        "axes.titlepad": 12.0,
-        "axes.labelpad": 7.0,
+        "axes.titlepad": 8.0,
+        "axes.labelpad": 5.0,
         "xtick.direction": "out",
         "ytick.direction": "out",
         "legend.frameon": True,
         "legend.framealpha": 0.95,
-        "legend.edgecolor": '0.85',
-        "figure.facecolor": "white",
-        "axes.facecolor": "white",
-        "savefig.facecolor": "white",
-        "lines.linewidth": 2.5,
+        "legend.edgecolor": '0.9',
+        "figure.facecolor": "#FAFBFC",
+        "axes.facecolor": "#FFFFFF",
+        "savefig.facecolor": "#FAFBFC",
+        "lines.linewidth": 2.0,
     })
 
     assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
@@ -1512,21 +1781,21 @@ if __name__ == "__main__":
     np.random.seed(42)
 
     fig, axes = plt.subplots(2, 4, figsize=(18, 10), constrained_layout=True)
+    fig.patch.set_facecolor('#FAFBFC')
 
-    # Beautiful color palette (Nord-inspired + vibrant accents)
-    colors = {
-        'reinforce': '#5E81AC',  # Nord blue
-        'bptt': '#D08770',       # Nord orange
-        'theory': '#A3BE8C',     # Nord green
-        'variance': '#BF616A',   # Nord red
-        'target': '#B48EAD',     # Nord purple
-        'sim': '#88C0D0',        # Nord cyan
+    # Color palette
+    COLORS = {
+        'reinforce': '#5E81AC',    # Steel blue
+        'bptt': '#D08770',         # Warm orange
+        'theory': '#4C566A',       # Slate gray
+        'variance': '#BF616A',     # Muted red
+        'target': '#B48EAD',       # Lavender
+        'sim': '#88C0D0',          # Cyan
     }
 
     # Line width settings
-    LW = 2.5       # Main lines
-    LW_THIN = 2.0  # Secondary lines
-    MS = 8         # Marker size
+    LW = 2.0
+    MS = 6
 
     # =========================================================================
     # Panel 1: Asymmetric Double-Well potential landscape
@@ -1598,9 +1867,9 @@ if __name__ == "__main__":
         p_theory = 1.0 / (1.0 + np.exp(beta_asym * 2 * b_val))
         p_right_theory.append(p_theory)
 
-    ax.plot(b_values, p_right_sim, 'o-', color=colors['sim'], lw=LW, ms=MS,
+    ax.plot(b_values, p_right_sim, 'o-', color=COLORS['sim'], lw=LW, ms=MS,
             label=f'Simulation (N={n_samples_p2:,})')
-    ax.plot(b_values, p_right_theory, '--', color=colors['theory'], lw=LW,
+    ax.plot(b_values, p_right_theory, '--', color=COLORS['theory'], lw=LW,
             label='Theory: 1/(1+exp(2βb))')
     ax.axhline(0.5, color='#4C566A', ls=':', lw=1.2, alpha=0.6)
     ax.axvline(0, color='#4C566A', ls=':', lw=1.2, alpha=0.6)
@@ -1662,11 +1931,11 @@ if __name__ == "__main__":
         grads = estimator.estimate_gradient(samples_bptt.detach(), observable=observable)
         reinforce_grads.append(grads['asymmetry'].item())
 
-    ax.plot(b_values_grad, theory_grads, 'o-', color=colors['theory'], lw=LW, ms=MS,
+    ax.plot(b_values_grad, theory_grads, 'o-', color=COLORS['theory'], lw=LW, ms=MS,
             label='Theory')
-    ax.plot(b_values_grad, bptt_grads, 's--', color=colors['bptt'], lw=LW, ms=MS-1,
+    ax.plot(b_values_grad, bptt_grads, 's--', color=COLORS['bptt'], lw=LW, ms=MS-1,
             label='BPTT')
-    ax.plot(b_values_grad, reinforce_grads, '^-', color=colors['reinforce'], lw=LW, ms=MS-1,
+    ax.plot(b_values_grad, reinforce_grads, '^-', color=COLORS['reinforce'], lw=LW, ms=MS-1,
             label='REINFORCE')
     ax.axhline(0, color='#4C566A', ls=':', lw=1.2, alpha=0.5)
     ax.axvline(0, color='#4C566A', ls=':', lw=1.2, alpha=0.5)
@@ -1756,9 +2025,9 @@ if __name__ == "__main__":
         b_history_bptt.append(potential_bptt.asymmetry.item())
 
     epochs_plot = range(len(b_history_rf))
-    ax.plot(epochs_plot, b_history_rf, '-', color=colors['reinforce'], lw=LW, label='REINFORCE')
-    ax.plot(epochs_plot, b_history_bptt, '--', color=colors['bptt'], lw=LW, label='BPTT')
-    ax.axhline(0, color=colors['theory'], ls=':', lw=LW, label='Optimal b=0')
+    ax.plot(epochs_plot, b_history_rf, '-', color=COLORS['reinforce'], lw=LW, label='REINFORCE')
+    ax.plot(epochs_plot, b_history_bptt, '--', color=COLORS['bptt'], lw=LW, label='BPTT')
+    ax.axhline(0, color=COLORS['theory'], ls=':', lw=LW, label='Optimal b=0')
     ax.set_xlabel('Optimization epoch')
     ax.set_ylabel('Asymmetry b')
     ax.set_title(f'Optimize for P_right=0.5 (N={n_samples_p4:,}/epoch)', fontweight='bold')
@@ -1767,9 +2036,9 @@ if __name__ == "__main__":
 
     # Inset: P_right convergence
     ax_ins = ax.inset_axes([0.52, 0.52, 0.43, 0.38])
-    ax_ins.plot(range(len(p_history_rf)), p_history_rf, '-', color=colors['reinforce'], lw=LW_THIN)
-    ax_ins.plot(range(len(p_history_bptt)), p_history_bptt, '--', color=colors['bptt'], lw=LW_THIN)
-    ax_ins.axhline(target_p, color=colors['target'], ls=':', lw=LW_THIN)
+    ax_ins.plot(range(len(p_history_rf)), p_history_rf, '-', color=COLORS['reinforce'], lw=LW)
+    ax_ins.plot(range(len(p_history_bptt)), p_history_bptt, '--', color=COLORS['bptt'], lw=LW)
+    ax_ins.axhline(target_p, color=COLORS['target'], ls=':', lw=LW)
     ax_ins.set_xlabel('Epoch', fontsize=9)
     ax_ins.set_ylabel('P_right', fontsize=9)
     ax_ins.tick_params(labelsize=8)
@@ -1826,11 +2095,11 @@ if __name__ == "__main__":
         grads_id = estimator_id.estimate_gradient(samples_bptt.detach(), observable=observable)
         implicit_grads_h.append(grads_id['k'].item())
 
-    ax.plot(k_values, theory_grads_h, 'o-', color=colors['theory'], label='Theory: −kT/k²',
+    ax.plot(k_values, theory_grads_h, 'o-', color=COLORS['theory'], label='Theory: −kT/k²',
             lw=LW, ms=MS)
-    ax.plot(k_values, bptt_grads_h, 's--', color=colors['bptt'], label='BPTT',
+    ax.plot(k_values, bptt_grads_h, 's--', color=COLORS['bptt'], label='BPTT',
             lw=LW, ms=MS-1)
-    ax.plot(k_values, reinforce_grads_h, '^-', color=colors['reinforce'], label='REINFORCE',
+    ax.plot(k_values, reinforce_grads_h, '^-', color=COLORS['reinforce'], label='REINFORCE',
             lw=LW, ms=MS-1)
     ax.plot(k_values, implicit_grads_h, 'v:', color='#B48EAD', label='Implicit Diff',
             lw=LW, ms=MS-1, alpha=0.8)
@@ -1892,10 +2161,10 @@ if __name__ == "__main__":
         reinforce_stds.append(np.std(rf_trials))
 
     ax.errorbar(trajectory_lengths, bptt_means, yerr=bptt_stds, fmt='s-',
-                color=colors['bptt'], label='BPTT', lw=LW, ms=MS, capsize=4, capthick=2)
+                color=COLORS['bptt'], label='BPTT', lw=LW, ms=MS, capsize=4, capthick=2)
     ax.errorbar(trajectory_lengths, reinforce_means, yerr=reinforce_stds, fmt='^-',
-                color=colors['reinforce'], label='REINFORCE', lw=LW, ms=MS, capsize=4, capthick=2)
-    ax.axhline(theory_grad, color=colors['theory'], ls='--', lw=LW,
+                color=COLORS['reinforce'], label='REINFORCE', lw=LW, ms=MS, capsize=4, capthick=2)
+    ax.axhline(theory_grad, color=COLORS['theory'], ls='--', lw=LW,
                label=f'Theory: {theory_grad:.1f}')
     ax.set_xlabel('Trajectory length (steps)')
     ax.set_ylabel('Gradient estimate')
@@ -1976,9 +2245,9 @@ if __name__ == "__main__":
     ax = axes[1, 2]
     print("\n[7] Computational time comparison...")
 
-    ax.plot(benchmark_traj_lengths, bptt_times, 'o-', color=colors['bptt'], lw=LW, ms=MS,
+    ax.plot(benchmark_traj_lengths, bptt_times, 'o-', color=COLORS['bptt'], lw=LW, ms=MS,
             label='BPTT', alpha=0.9)
-    ax.plot(benchmark_traj_lengths, reinforce_times, '^-', color=colors['reinforce'], lw=LW, ms=MS,
+    ax.plot(benchmark_traj_lengths, reinforce_times, '^-', color=COLORS['reinforce'], lw=LW, ms=MS,
             label='REINFORCE', alpha=0.9)
     ax.set_xlabel('Trajectory length (steps)')
     ax.set_ylabel('Execution time (seconds)')
@@ -2001,9 +2270,9 @@ if __name__ == "__main__":
     ax = axes[1, 3]
     print("\n[8] Memory usage comparison...")
 
-    ax.plot(benchmark_traj_lengths, bptt_memory, 'o-', color=colors['bptt'], lw=LW, ms=MS,
+    ax.plot(benchmark_traj_lengths, bptt_memory, 'o-', color=COLORS['bptt'], lw=LW, ms=MS,
             label='BPTT', alpha=0.9)
-    ax.plot(benchmark_traj_lengths, reinforce_memory, '^-', color=colors['reinforce'], lw=LW, ms=MS,
+    ax.plot(benchmark_traj_lengths, reinforce_memory, '^-', color=COLORS['reinforce'], lw=LW, ms=MS,
             label='REINFORCE', alpha=0.9)
     ax.set_xlabel('Trajectory length (steps)')
     ax.set_ylabel('Peak memory (MB)')
@@ -2036,7 +2305,7 @@ if __name__ == "__main__":
     # Save figure
     # =========================================================================
     plt.savefig(os.path.join(assets_dir, "gradient_estimators.png"), dpi=150,
-                bbox_inches='tight', facecolor='white')
+                bbox_inches='tight', facecolor='#FAFBFC')
     print(f"\n[+] Saved plot to assets/gradient_estimators.png")
 
     # =========================================================================

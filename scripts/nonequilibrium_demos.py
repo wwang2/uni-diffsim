@@ -37,33 +37,50 @@ from uni_diffsim import (
     ReinforceEstimator, ImplicitDiffEstimator,
 )
 
-# Plotting settings
+# Plotting settings (Nord-inspired, editorial)
 plt.rcParams.update({
-    'font.size': 12,
-    'axes.titlesize': 14,
-    'axes.labelsize': 12,
-    'xtick.labelsize': 11,
-    'ytick.labelsize': 11,
-    'legend.fontsize': 10,
-    'figure.titlesize': 16,
+    "font.family": "monospace",
+    "font.monospace": ["JetBrains Mono", "DejaVu Sans Mono", "Menlo", "Monaco"],
+    "font.size": 11,
+    "axes.titlesize": 12,
+    "axes.labelsize": 11,
+    "xtick.labelsize": 10,
+    "ytick.labelsize": 10,
+    "legend.fontsize": 9,
+    "axes.grid": True,
+    "grid.alpha": 0.2,
+    "grid.linewidth": 0.5,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.titlepad": 8.0,
+    "axes.labelpad": 5.0,
+    "xtick.direction": "out",
+    "ytick.direction": "out",
+    "legend.frameon": True,
+    "legend.framealpha": 0.95,
+    "legend.edgecolor": '0.9',
+    "figure.facecolor": "#FAFBFC",
+    "axes.facecolor": "#FFFFFF",
+    "savefig.facecolor": "#FAFBFC",
+    "lines.linewidth": 2.0,
 })
 
 # Color palette (Nord-inspired)
 COLORS = {
-    'overdamped': '#5E81AC',   # Blue
-    'baoab': '#A3BE8C',        # Green
-    'theory': '#EBCB8B',       # Yellow
-    'target': '#BF616A',       # Red
-    'optimal': '#B48EAD',      # Purple
+    'overdamped': '#5E81AC',   # Steel blue
+    'baoab': '#A3BE8C',        # Sage green
+    'theory': '#4C566A',       # Slate gray
+    'target': '#BF616A',       # Muted red
+    'optimal': '#B48EAD',      # Lavender
     'neural': '#88C0D0',       # Cyan
-    'barrier': '#D08770',      # Orange
-    'bptt': '#D08770',         # Orange (same as barrier)
-    'reinforce': '#5E81AC',    # Blue
-    'implicit': '#A3BE8C',     # Green
+    'barrier': '#D08770',      # Warm orange
+    'bptt': '#D08770',         # Warm orange
+    'reinforce': '#5E81AC',    # Steel blue
+    'implicit': '#A3BE8C',     # Sage green
 }
 
-LW = 2.5
-MS = 8
+LW = 2.0
+MS = 6
 
 
 def soft_indicator(x, threshold, sigma=0.1):
@@ -757,6 +774,7 @@ def plot_results(fpt_results, trans_results, control_results, save_path):
     """Create comprehensive figure with all demo results."""
 
     fig, axes = plt.subplots(2, 4, figsize=(18, 9))
+    fig.patch.set_facecolor('#FAFBFC')
 
     # =========================================================================
     # Panel 1: First Passage Time vs Barrier Height
@@ -923,7 +941,7 @@ def plot_results(fpt_results, trans_results, control_results, save_path):
                 fontsize=9, ha='left', color=COLORS['neural'])
 
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='white')
+    plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='#FAFBFC')
     print(f"\n[+] Saved plot to {save_path}")
 
     return fig

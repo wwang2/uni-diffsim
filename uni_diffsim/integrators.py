@@ -207,10 +207,11 @@ class NoseHoover(nn.Module):
         v2 = (v**2).sum(dim=-1)
         
         # First thermostat half-step
-        alpha = alpha + (dt / 4) * (v2 / self.kT - ndof)
+        # dα/dt = (v² - ndof·kT) / Q (Nosé-Hoover equation)
+        alpha = alpha + (dt / 4) * (v2 - ndof * self.kT) / self.Q
         v = v * torch.exp(-alpha.unsqueeze(-1) * dt / 2)
         v2 = (v**2).sum(dim=-1)
-        alpha = alpha + (dt / 4) * (v2 / self.kT - ndof)
+        alpha = alpha + (dt / 4) * (v2 - ndof * self.kT) / self.Q
         
         # Velocity-Verlet for physical degrees of freedom
         v = v + (dt / 2) * force_fn(x) / self.mass
@@ -219,10 +220,10 @@ class NoseHoover(nn.Module):
         
         # Second thermostat half-step
         v2 = (v**2).sum(dim=-1)
-        alpha = alpha + (dt / 4) * (v2 / self.kT - ndof)
+        alpha = alpha + (dt / 4) * (v2 - ndof * self.kT) / self.Q
         v = v * torch.exp(-alpha.unsqueeze(-1) * dt / 2)
         v2 = (v**2).sum(dim=-1)
-        alpha = alpha + (dt / 4) * (v2 / self.kT - ndof)
+        alpha = alpha + (dt / 4) * (v2 - ndof * self.kT) / self.Q
         
         return x, v, alpha
     
@@ -665,48 +666,49 @@ if __name__ == "__main__":
     from scipy.stats import gaussian_kde
     from .potentials import DoubleWell, DoubleWell2D, Harmonic
     
-    # Plotting style with larger fonts
+    # Plotting style (Nord-inspired, editorial)
     plt.rcParams.update({
         "font.family": "monospace",
-        "font.monospace": ["DejaVu Sans Mono", "Menlo", "Consolas", "Monaco"],
-        "font.size": 13,
-        "axes.titlesize": 15,
-        "axes.labelsize": 13,
-        "xtick.labelsize": 12,
-        "ytick.labelsize": 12,
-        "legend.fontsize": 11,
+        "font.monospace": ["JetBrains Mono", "DejaVu Sans Mono", "Menlo", "Monaco"],
+        "font.size": 11,
+        "axes.titlesize": 12,
+        "axes.labelsize": 11,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        "legend.fontsize": 9,
         "axes.grid": True,
-        "grid.alpha": 0.3,
-        "grid.linewidth": 0.8,
+        "grid.alpha": 0.2,
+        "grid.linewidth": 0.5,
         "axes.spines.top": False,
         "axes.spines.right": False,
-        "axes.titlepad": 12.0,
-        "axes.labelpad": 7.0,
+        "axes.titlepad": 8.0,
+        "axes.labelpad": 5.0,
         "xtick.direction": "out",
         "ytick.direction": "out",
-        "legend.frameon": False,
-        "legend.framealpha": 0.9,
-        "figure.facecolor": "white",
-        "axes.facecolor": "white",
-        "savefig.facecolor": "white",
-        "lines.linewidth": 1.5,
+        "legend.frameon": True,
+        "legend.framealpha": 0.95,
+        "legend.edgecolor": '0.9',
+        "figure.facecolor": "#FAFBFC",
+        "axes.facecolor": "#FFFFFF",
+        "savefig.facecolor": "#FAFBFC",
+        "lines.linewidth": 2.0,
     })
-    
+
     assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
     os.makedirs(assets_dir, exist_ok=True)
-    
+
     fig, axes = plt.subplots(3, 3, figsize=(15, 12), constrained_layout=True)
-    
-    # Common colormap and style
-    # Distinct colors for better separation
-    colors = {
-        'Overdamped': '#1f77b4',  # Blue
-        'BAOAB': '#ff7f0e',       # Orange
-        'GLE': '#2ca02c',         # Green
-        'NH': '#d62728',          # Red
-        'ESH': '#9467bd',         # Purple
-        'VelocityVerlet': '#8c564b', # Brown
-        'NoseHooverChain': '#e377c2' # Pink
+    fig.patch.set_facecolor('#FAFBFC')
+
+    # Color palette
+    COLORS = {
+        'Overdamped': '#5E81AC',   # Steel blue
+        'BAOAB': '#D08770',        # Warm orange
+        'GLE': '#A3BE8C',          # Sage green
+        'NH': '#BF616A',           # Muted red
+        'ESH': '#B48EAD',          # Lavender
+        'Verlet': '#4C566A',       # Slate gray
+        'NHC': '#88C0D0',          # Cyan
     }
     
     # Setup for 1D double well
@@ -747,7 +749,7 @@ if __name__ == "__main__":
     traj_od = integrator.run(x0, force_fn_1d, dt, n_steps, store_every=10)
     t = np.arange(traj_od.shape[0]) * dt * 10
     for i in range(min(3, n_batch)):
-        ax.plot(t, traj_od[:, i].detach().numpy(), alpha=0.75, lw=1.8, color=colors['Overdamped'])
+        ax.plot(t, traj_od[:, i].detach().numpy(), alpha=0.75, lw=1.8, color=COLORS['Overdamped'])
     ax.axhline(1, color='gray', ls='--', alpha=0.6, lw=1.5)
     ax.axhline(-1, color='gray', ls='--', alpha=0.6, lw=1.5)
     ax.set_xlabel('Time')
@@ -757,14 +759,14 @@ if __name__ == "__main__":
     # Add density inset
     burn_in = 2000
     samples_od = traj_od[burn_in//10:].flatten().detach().numpy()
-    add_1d_density_inset(ax, samples_od, dw, kT, colors['Overdamped'])
+    add_1d_density_inset(ax, samples_od, dw, kT, COLORS['Overdamped'])
     
     # 2. BAOAB
     ax = axes[0, 1]
     integrator = BAOAB(gamma=1.0, kT=kT, mass=1.0)
     traj_baoab, _ = integrator.run(x0, None, force_fn_1d, dt, n_steps, store_every=10)
     for i in range(min(3, n_batch)):
-        ax.plot(t, traj_baoab[:, i].detach().numpy(), alpha=0.75, lw=1.8, color=colors['BAOAB'])
+        ax.plot(t, traj_baoab[:, i].detach().numpy(), alpha=0.75, lw=1.8, color=COLORS['BAOAB'])
     ax.axhline(1, color='gray', ls='--', alpha=0.6, lw=1.5)
     ax.axhline(-1, color='gray', ls='--', alpha=0.6, lw=1.5)
     ax.set_xlabel('Time')
@@ -773,14 +775,14 @@ if __name__ == "__main__":
     ax.set_axisbelow(True)
     # Add density inset
     samples_baoab = traj_baoab[burn_in//10:].flatten().detach().numpy()
-    add_1d_density_inset(ax, samples_baoab, dw, kT, colors['BAOAB'])
+    add_1d_density_inset(ax, samples_baoab, dw, kT, COLORS['BAOAB'])
     
     # 3. GLE (colored noise)
     ax = axes[0, 2]
     gle = GLE(kT=kT, mass=1.0, gamma=[0.5, 2.0], c=[0.3, 1.0])
     traj_gle, _ = gle.run(x0, None, force_fn_1d, dt, n_steps, store_every=10)
     for i in range(min(3, n_batch)):
-        ax.plot(t, traj_gle[:, i].detach().numpy(), alpha=0.75, lw=1.8, color=colors['GLE'])
+        ax.plot(t, traj_gle[:, i].detach().numpy(), alpha=0.75, lw=1.8, color=COLORS['GLE'])
     ax.axhline(1, color='gray', ls='--', alpha=0.6, lw=1.5)
     ax.axhline(-1, color='gray', ls='--', alpha=0.6, lw=1.5)
     ax.set_xlabel('Time')
@@ -789,7 +791,7 @@ if __name__ == "__main__":
     ax.set_axisbelow(True)
     # Add density inset
     samples_gle = traj_gle[burn_in//10:].flatten().detach().numpy()
-    add_1d_density_inset(ax, samples_gle, dw, kT, colors['GLE'])
+    add_1d_density_inset(ax, samples_gle, dw, kT, COLORS['GLE'])
     
     # 4. 2D Double Well Sampling (Row 2)
     # Use DoubleWell2D instead of Harmonic
@@ -887,7 +889,7 @@ if __name__ == "__main__":
     # Importance resampling for scatter
     esh_idx = np.random.choice(len(esh_samples), size=5000, p=esh_w_flat)
     ax.scatter(esh_samples[esh_idx, 0], esh_samples[esh_idx, 1], s=5, alpha=0.3, 
-               c=colors['ESH'], edgecolors='none')
+               c=COLORS['ESH'], edgecolors='none')
                
     ax.set_title('ESH (2D Double Well)', fontweight='bold')
     ax.set_aspect('equal')
@@ -898,7 +900,7 @@ if __name__ == "__main__":
     ax = axes[1, 1]
     ax.contour(X.numpy(), Y.numpy(), U_grid.detach().numpy(), levels=np.linspace(0, 5, 10), colors='k', alpha=0.2)
     ax.scatter(nh_samples[::10, 0], nh_samples[::10, 1], s=5, alpha=0.3,
-               c=colors['NH'], edgecolors='none')
+               c=COLORS['NH'], edgecolors='none')
     ax.set_title('Nosé-Hoover (2D Double Well)', fontweight='bold')
     ax.set_aspect('equal')
     ax.set_xlim(-2.5, 2.5); ax.set_ylim(-2.5, 2.5)
@@ -908,7 +910,7 @@ if __name__ == "__main__":
     ax = axes[1, 2]
     ax.contour(X.numpy(), Y.numpy(), U_grid.detach().numpy(), levels=np.linspace(0, 5, 10), colors='k', alpha=0.2)
     ax.scatter(baoab_samples[::2, 0], baoab_samples[::2, 1], s=5, alpha=0.3,
-               c=colors['BAOAB'], edgecolors='none')
+               c=COLORS['BAOAB'], edgecolors='none')
     ax.set_title('BAOAB (2D Double Well)', fontweight='bold')
     ax.set_aspect('equal')
     ax.set_xlim(-2.5, 2.5); ax.set_ylim(-2.5, 2.5)
@@ -1015,8 +1017,8 @@ if __name__ == "__main__":
     x = np.arange(len(names))
     width = 0.35
     
-    rects1 = ax_bench.bar(x - width/2, fwd_times, width, label='Forward (Execution)', color='#1f77b4', alpha=0.8)
-    rects2 = ax_bench.bar(x + width/2, bwd_times, width, label='Backward (Gradient)', color='#ff7f0e', alpha=0.8)
+    rects1 = ax_bench.bar(x - width/2, fwd_times, width, label='Forward (Execution)', color=COLORS['Overdamped'], alpha=0.8)
+    rects2 = ax_bench.bar(x + width/2, bwd_times, width, label='Backward (Gradient)', color=COLORS['BAOAB'], alpha=0.8)
     
     ax_bench.set_ylabel('Time (s)')
     ax_bench.set_title('Performance Benchmark (100 steps, batch=256, dim=64)', fontweight='bold')
@@ -1027,7 +1029,7 @@ if __name__ == "__main__":
     ax_bench.grid(axis='y', alpha=0.3)
     
     plt.savefig(os.path.join(assets_dir, "integrators.png"), dpi=150, 
-                bbox_inches='tight', facecolor='white')
+                bbox_inches='tight', facecolor='#FAFBFC')
     import time
     import tracemalloc
 

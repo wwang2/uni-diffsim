@@ -270,39 +270,43 @@ if __name__ == "__main__":
     import numpy as np
     import matplotlib.pyplot as plt
     
-    # Plotting style with larger fonts
+    # Plotting style (Nord-inspired, editorial)
     plt.rcParams.update({
         "font.family": "monospace",
-        "font.monospace": ["DejaVu Sans Mono", "Menlo", "Consolas", "Monaco"],
-        "font.size": 13,
-        "axes.titlesize": 15,
-        "axes.labelsize": 13,
-        "xtick.labelsize": 12,
-        "ytick.labelsize": 12,
-        "legend.fontsize": 11,
+        "font.monospace": ["JetBrains Mono", "DejaVu Sans Mono", "Menlo", "Monaco"],
+        "font.size": 11,
+        "axes.titlesize": 12,
+        "axes.labelsize": 11,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        "legend.fontsize": 9,
         "axes.grid": True,
-        "grid.alpha": 0.25,
-        "grid.linewidth": 0.7,
+        "grid.alpha": 0.2,
+        "grid.linewidth": 0.5,
         "axes.spines.top": False,
         "axes.spines.right": False,
-        "axes.titlepad": 10.0,
-        "axes.labelpad": 6.0,
+        "axes.titlepad": 8.0,
+        "axes.labelpad": 5.0,
         "xtick.direction": "out",
         "ytick.direction": "out",
-        "legend.frameon": False,
-        "figure.facecolor": "white",
-        "axes.facecolor": "white",
-        "savefig.facecolor": "white",
+        "legend.frameon": True,
+        "legend.framealpha": 0.95,
+        "legend.edgecolor": '0.9',
+        "figure.facecolor": "#FAFBFC",
+        "axes.facecolor": "#FFFFFF",
+        "savefig.facecolor": "#FAFBFC",
+        "lines.linewidth": 2.0,
     })
     
     assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
     os.makedirs(assets_dir, exist_ok=True)
     
     fig, axes = plt.subplots(2, 2, figsize=(10, 8), constrained_layout=True)
+    fig.patch.set_facecolor('#FAFBFC')
     
     # Common colormap and style
     cmap = 'BuPu'
-    particle_color = '#88419d'  # Deep purple from BuPu palette
+    particle_color = '#5E81AC'  # Steel blue from Nord palette
     
     # 1. Double Well 2D
     ax = axes[0, 0]
@@ -406,6 +410,6 @@ if __name__ == "__main__":
     ax.set_axisbelow(True)
     
     plt.savefig(os.path.join(assets_dir, "potentials.png"), dpi=150, 
-                bbox_inches='tight', facecolor='white')
+                bbox_inches='tight', facecolor='#FAFBFC')
     print(f"Saved potentials plot to assets/potentials.png")
 
