@@ -46,46 +46,20 @@ from uni_diffsim import (
     DoubleWell, AsymmetricDoubleWell, Harmonic,
     ReinforceEstimator, ImplicitDiffEstimator,
 )
+from uni_diffsim.plotting import apply_style, COLORS as BASE_COLORS, LW, MS
 
-# =============================================================================
-# Plotting Style (Nord-inspired, editorial)
-# =============================================================================
-plt.rcParams.update({
-    "font.family": "monospace",
-    "font.monospace": ["JetBrains Mono", "DejaVu Sans Mono", "Menlo", "Monaco"],
-    "font.size": 11,
-    "axes.titlesize": 12,
-    "axes.labelsize": 11,
-    "xtick.labelsize": 10,
-    "ytick.labelsize": 10,
-    "legend.fontsize": 9,
-    "axes.grid": True,
-    "grid.alpha": 0.2,
-    "grid.linewidth": 0.5,
-    "axes.spines.top": False,
-    "axes.spines.right": False,
-    "axes.titlepad": 8.0,
-    "axes.labelpad": 5.0,
-    "xtick.direction": "out",
-    "ytick.direction": "out",
-    "legend.frameon": True,
-    "legend.framealpha": 0.95,
-    "legend.edgecolor": '0.9',
-    "figure.facecolor": "#FAFBFC",
-    "axes.facecolor": "#FFFFFF",
-    "savefig.facecolor": "#FAFBFC",
-    "lines.linewidth": 2.0,
-})
+# Apply shared plotting style
+apply_style()
 
-# Color palette
+# Extend color palette for this script
 COLORS = {
-    'BPTT': '#D08770',         # Warm orange
-    'REINFORCE': '#5E81AC',    # Steel blue
-    'Implicit': '#A3BE8C',     # Sage green
-    'Invalid': '#BF616A',      # Muted red
-    'Theory': '#4C566A',       # Slate gray
-    'Target': '#B48EAD',       # Lavender
-    'fill': '#E5E9F0',         # Light fill
+    'BPTT': BASE_COLORS['bptt'],
+    'REINFORCE': BASE_COLORS['reinforce'],
+    'Implicit': BASE_COLORS['implicit'],
+    'Invalid': BASE_COLORS['invalid'],
+    'Theory': BASE_COLORS['theory'],
+    'Target': BASE_COLORS['target'],
+    'fill': BASE_COLORS['fill'],
 }
 
 MARKERS = {
@@ -93,9 +67,6 @@ MARKERS = {
     'REINFORCE': '^',
     'Implicit': 's',
 }
-
-LW = 2.0
-MS = 6
 N_TRIALS = 5  # Number of trials for uncertainty estimation
 
 
@@ -1052,7 +1023,7 @@ if __name__ == "__main__":
     os.makedirs(assets_dir, exist_ok=True)
     
     # Plot and save
-    save_path = os.path.join(assets_dir, "gradient_methods_comparison.png")
+    save_path = os.path.join(assets_dir, "demo_gradient_estimators.png")
     plot_comprehensive_comparison(results, save_path)
     
     # Print summary
