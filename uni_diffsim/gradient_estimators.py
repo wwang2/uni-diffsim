@@ -492,19 +492,19 @@ class GirsanovEstimator(nn.Module):
         dx = trajectory[1:] - trajectory[:-1]  # (n_steps-1, ..., dim)
 
         # Compute forces at each step
-        forces = torch.stack([
-            self.potential.force(trajectory[t])
-            for t in range(n_steps - 1)
-        ])  # (n_steps-1, ..., dim)
+        # Vectorized call to potential.force for efficiency
+        forces = self.potential.force(trajectory[:-1])  # (n_steps-1, ..., dim)
 
         # Noise increment: dx - F*dt (should be ~ σ*dW)
         noise_increment = dx - forces * dt
 
         # Girsanov weight integrand: (1/σ²) F · dW
-        # Sum over all dimensions (including particle dims if present)
-        # Assume last dim is spatial dim, but might have particle dim before it
-        # We flatten spatial dimensions for dot product
-        flat_dims = tuple(range(1, forces.ndim))
+        # Sum over all spatial/particle dimensions, keeping batch and time dims
+        event_dim = getattr(self.potential, 'event_dim', 1)
+        # Time is dim 0. Batch dimensions are between 0 and event_dims
+        n_batch_dims = forces.ndim - 1 - event_dim
+        flat_dims = tuple(range(1 + n_batch_dims, forces.ndim))
+        
         integrand = (1 / self.sigma**2) * (forces * noise_increment).sum(dim=flat_dims)
 
         # Integrate over trajectory
@@ -524,7 +524,7 @@ class GirsanovEstimator(nn.Module):
             ∇_θ ⟨O⟩ = ⟨O · ∇_θ log p(τ|θ)⟩
 
         Args:
-            trajectories: Multiple trajectories (n_traj, n_steps, dim) or
+            trajectories: Multiple trajectories (n_traj, n_steps, ..., dim) or
                          single trajectory (n_steps, ..., dim)
             observable: Observable computed on trajectories
             dt: Time step used in simulation
@@ -533,7 +533,9 @@ class GirsanovEstimator(nn.Module):
             Dictionary of gradient estimates per parameter.
         """
         # Ensure batch dimension
-        if trajectories.dim() == 2:
+        # If trajectories is (n_steps, ..., dim), add n_traj=1 at dim 0
+        event_dim = getattr(self.potential, 'event_dim', 1)
+        if trajectories.ndim == event_dim + 1:
             trajectories = trajectories.unsqueeze(0)
 
         n_traj = trajectories.shape[0]
@@ -541,30 +543,28 @@ class GirsanovEstimator(nn.Module):
         # Compute observables
         O = observable(trajectories)  # (n_traj,)
 
-        # Compute log path scores and their gradients
+        # Compute log path scores and their gradients (vectorized over trajectories)
+        # Transpose to put time at dim 0 for compute_log_path_score
+        # (n_traj, n_steps, ...) -> (n_steps, n_traj, ...)
+        trajectories_reordered = trajectories.transpose(0, 1)
+        log_scores = self.compute_log_path_score(trajectories_reordered, dt)  # (n_traj,)
+
+        # REINFORCE in path space: ∇_θ ⟨O⟩ = ⟨O * ∇_θ log p(τ)⟩
+        # We compute gradient of ⟨O * log p(τ)⟩
+        weighted_log_scores = (O * log_scores).sum()
+
         grads = {}
+        for name, param in self.potential.named_parameters():
+            if not param.requires_grad:
+                continue
 
-        for i in range(n_traj):
-            traj = trajectories[i]
-            log_score = self.compute_log_path_score(traj, dt)
+            grad = torch.autograd.grad(
+                weighted_log_scores, param,
+                create_graph=True, retain_graph=True, allow_unused=True
+            )[0]
 
-            # REINFORCE in path space: O * ∇_θ log p(τ)
-            weighted_log_score = O[i] * log_score
-
-            for name, param in self.potential.named_parameters():
-                if not param.requires_grad:
-                    continue
-
-                grad = torch.autograd.grad(
-                    weighted_log_score.sum(), param,
-                    create_graph=True, retain_graph=True, allow_unused=True
-                )[0]
-
-                if grad is not None:
-                    if name not in grads:
-                        grads[name] = grad / n_traj
-                    else:
-                        grads[name] = grads[name] + grad / n_traj
+            if grad is not None:
+                grads[name] = grad / n_traj
 
         return grads
 
