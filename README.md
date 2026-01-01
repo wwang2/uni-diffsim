@@ -1,7 +1,7 @@
 
 # Many Paths to Simulation Gradients
 
-> “All chaos is order misunderstood.”    — Alexander Pope
+> "All chaos is order misunderstood."    — Alexander Pope
 
 This project explores a question I've wondered about for years:
 
@@ -41,13 +41,14 @@ pip install -e ".[dev]"
 
 ![Gradient Estimators Comparison](assets/demo_gradient_estimators.png)
 
-Three approaches for computing gradients through stochastic simulations:
+Four approaches for computing gradients through stochastic simulations:
 
 | Method | Memory | Equilibrium | Non-Equilibrium | Notes |
 |--------|--------|-------------|-----------------|-------|
 | **BPTT** | O(T) | ✓ | ✓ | Universal, backprop through trajectory |
 | **REINFORCE** | O(1) | ✓ | ✗ | Score function / TPT, equilibrium only |
 | **Implicit** | O(1) | ✓ | ✗ | Implicit differentiation, equilibrium only |
+| **Girsanov** | O(1) | ✓ | ✓ | Path reweighting, high variance for long T |
 
 The REINFORCE estimator uses the thermodynamic perturbation theory identity:
 ```
@@ -63,7 +64,32 @@ The REINFORCE estimator uses the thermodynamic perturbation theory identity:
 python scripts/demo_gradient_estimators.py  # Generate the comparison plot
 ```
 
-## Adjoint Methods (implemented for Nose hoover)
+### Girsanov Path Reweighting
+
+![Girsanov Analysis](assets/demo_girsanov.png)
+
+The Girsanov estimator uses path-space score functions for non-equilibrium problems:
+```
+∇_θ ⟨O⟩ = ⟨O · ∇_θ log p(τ|θ)⟩
+```
+
+where the log path probability gradient is:
+```
+∇_θ log p(τ|θ) = (1/σ²) ∫₀ᵀ ∇_θF(x_t) · (dx_t - F(x_t)dt)
+```
+
+**Key findings**:
+- **Variance grows with trajectory length**: For T > relaxation time, estimates become unreliable
+- **Observable complexity matters**: Simple observables (final state) work better than path-dependent ones (FPT)
+- **Effective sample size decays**: ESS/N drops from ~95% at T=0.1s to ~1% at T=50s
+- **For equilibrium**: Prefer REINFORCE (bounded variance) over Girsanov
+- **Can be used for optimization**: But requires lower learning rates due to gradient noise
+
+```bash
+python scripts/demo_girsanov.py  # Generate the Girsanov analysis plot
+```
+
+## Adjoint Methods (Trade Memory with Time!)
 
 ![Nosé-Hoover Adjoint](assets/demo_nosehoover_adjoint.png)
 
