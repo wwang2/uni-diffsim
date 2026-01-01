@@ -222,11 +222,11 @@ def run_double_well_equilibrium():
     
     kT = 0.5
     beta = 1.0 / kT
-    barrier_values = np.linspace(0.8, 2.0, 7)
+    barrier_values = np.linspace(0.7, 8.0, 7)
     
     n_walkers = 150
-    n_steps = 600
-    burn_in = 150
+    n_steps = 200
+    burn_in = 50
     dt = 0.01
     n_epochs = 25
     sigma_soft = 0.1
@@ -244,7 +244,7 @@ def run_double_well_equilibrium():
         
         for trial in range(N_TRIALS):
             torch.manual_seed(trial * 100 + int(b * 10))
-            x0 = torch.randn(n_walkers, 1)
+            x0 = -torch.randn(n_walkers, 1).abs()
             
             potential_bptt = DoubleWell(barrier_height=b)
             integrator = OverdampedLangevin(gamma=1.0, kT=kT)
@@ -277,9 +277,9 @@ def run_double_well_equilibrium():
     # Loss history - different configs for each method
     target_p = 0.5
     method_configs = {
-        'BPTT': {'init': 1.5, 'lr': 0.12, 'seed_offset': 0},
-        'REINFORCE': {'init': 1.7, 'lr': 0.10, 'seed_offset': 1000},
-        'Implicit': {'init': 1.3, 'lr': 0.08, 'seed_offset': 2000},
+        'BPTT': {'init': 3.5, 'lr': 0.1, 'seed_offset': 0},
+        'REINFORCE': {'init': 3.5, 'lr': 0.10, 'seed_offset': 1000},
+        'Implicit': {'init': 3.5, 'lr': 0.1, 'seed_offset': 2000},
     }
     
     for method in ['BPTT', 'REINFORCE', 'Implicit']:
@@ -290,7 +290,9 @@ def run_double_well_equilibrium():
         for epoch in range(n_epochs):
             gc.collect()
             torch.manual_seed(epoch + cfg['seed_offset'])
-            x0 = torch.randn(n_walkers, 1)
+
+            # start from left well
+            x0 = -torch.randn(n_walkers, 1).abs()
             
             if method == 'BPTT':
                 barrier_tensor = torch.tensor([barrier_param], requires_grad=True)
@@ -337,7 +339,7 @@ def run_asymmetric_equilibrium():
     
     kT = 0.5
     beta = 1.0 / kT
-    b_values = np.linspace(-0.5, 0.5, 7)
+    b_values = np.linspace(-2.0, 2.0, 7)
     
     n_walkers = 150
     n_steps = 500
@@ -391,9 +393,9 @@ def run_asymmetric_equilibrium():
     # Loss history - different configs for each method
     target_mean = 0.0
     method_configs = {
-        'BPTT': {'init': 0.3, 'lr': 0.15, 'seed_offset': 0},
-        'REINFORCE': {'init': 0.4, 'lr': 0.12, 'seed_offset': 1000},
-        'Implicit': {'init': 0.2, 'lr': 0.10, 'seed_offset': 2000},
+        'BPTT': {'init': 0.9, 'lr': 0.15, 'seed_offset': 0},
+        'REINFORCE': {'init': 0.9, 'lr': 0.12, 'seed_offset': 1000},
+        'Implicit': {'init': 0.9, 'lr': 0.10, 'seed_offset': 2000},
     }
     
     for method in ['BPTT', 'REINFORCE', 'Implicit']:
@@ -570,10 +572,10 @@ def run_transition_prob_nonequilibrium():
     beta = 1.0 / kT
     barrier_values = np.linspace(0.8, 2.0, 7)
     
-    n_walkers = 200
+    n_walkers = 400
     n_steps = 300
     dt = 0.01
-    n_epochs = 25
+    n_epochs = 80
     sigma_soft = 0.1
     
     results = {
@@ -801,18 +803,18 @@ def run_optimal_control():
 # =============================================================================
 
 def plot_comprehensive_comparison(results_list, save_path):
-    """Create a 3×6 grid: methods (rows) × systems (columns)."""
+    """Create a 3×5 grid: methods (rows) × systems (columns)."""
     
-    fig, axes = plt.subplots(3, 6, figsize=(22, 10))
+    fig, axes = plt.subplots(3, 5, figsize=(18, 10))
     fig.patch.set_facecolor('#FAFBFC')
     
     method_names = ['BPTT', 'REINFORCE', 'Implicit']
-    system_names = ['Harmonic', 'Double Well', 'Asym. DW', 'FPT', 'Trans. Prob.', 'Opt. Control']
-    system_types = ['EQ', 'EQ', 'EQ', 'NON-EQ', 'NON-EQ', 'NON-EQ']
+    system_names = ['Harmonic', 'Asym. DW', 'FPT', 'Trans. Prob.', 'Opt. Control']
+    system_types = ['EQ', 'EQ', 'NON-EQ', 'NON-EQ', 'NON-EQ']
     
     for col, (res, sys_name, sys_type) in enumerate(zip(results_list, system_names, system_types)):
-        is_equilibrium = col < 3
-        is_control = col == 5
+        is_equilibrium = col < 2
+        is_control = col == 4
         
         for row, method in enumerate(method_names):
             ax = axes[row, col]
@@ -965,7 +967,6 @@ def print_summary_table(results_list):
     
     system_names = [
         'Harmonic (Eq.)',
-        'Double Well (Eq.)',
         'Asymmetric DW (Eq.)',
         'First Passage Time',
         'Transition Prob.',
@@ -1008,7 +1009,7 @@ if __name__ == "__main__":
     # Run all experiments
     results = []
     results.append(run_harmonic_equilibrium())
-    results.append(run_double_well_equilibrium())
+    # results.append(run_double_well_equilibrium())
     results.append(run_asymmetric_equilibrium())
     results.append(run_fpt_nonequilibrium())
     results.append(run_transition_prob_nonequilibrium())

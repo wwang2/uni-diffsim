@@ -121,19 +121,6 @@ estimator = ForwardSensitivityEstimator(integrator, param_names=['kT'])
 python scripts/benchmark_forward_vs_adjoint.py  # Generate the benchmark plot
 ```
 
-## Potentials
-
-![Potentials](assets/potentials.png)
-
-| Potential | Dim | Use |
-|-----------|-----|-----|
-| `DoubleWell` | 1D | Barrier crossing |
-| `AsymmetricDoubleWell` | 1D | Metastable populations |
-| `MullerBrown` | 2D | Reaction paths |
-| `LennardJones` | N×d | Clusters |
-| `Harmonic` | d | Reference |
-
-
 ## Usage
 
 ```python
