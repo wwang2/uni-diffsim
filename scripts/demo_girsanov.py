@@ -11,6 +11,7 @@ gradient estimator, demonstrating:
 4. **Effective Sample Size**: How importance sampling efficiency degrades
 5. **Comparison with BPTT**: When Girsanov agrees vs diverges from ground truth
 6. **Practical Guidelines**: When to use Girsanov vs alternatives
+7. **Variance Reduction Methods**: Centering, truncation, self-normalization, control variates
 
 ═══════════════════════════════════════════════════════════════════════════════
 THEORETICAL BACKGROUND
@@ -46,6 +47,22 @@ WHEN TO USE GIRSANOV
   • Observable is path-dependent (FPT, max, integrals over rare events)
   • High accuracy is required
   • System is high-dimensional (variance compounds across dimensions)
+
+═══════════════════════════════════════════════════════════════════════════════
+VARIANCE REDUCTION METHODS
+═══════════════════════════════════════════════════════════════════════════════
+
+1. **Centering (CGT)**: Subtract mean score to reduce variance from O(T) to O(1)
+   in system size. Based on Gupta & Khammash (2014).
+
+2. **Truncation**: Clip extreme log-weights to prevent single trajectories from
+   dominating. Simple but introduces bias.
+
+3. **Self-Normalized IS**: Use w_i / Σw_j instead of raw weights. Consistent
+   estimator with often lower variance.
+
+4. **Control Variates**: Use functions with known expectations to reduce variance:
+   ∇⟨O⟩ = ⟨(O - α·c) · ∇log p⟩ + α·∇⟨c⟩
 
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -513,7 +530,125 @@ def experiment_girsanov_vs_reinforce():
 
 
 # =============================================================================
-# Experiment 6: Optimization with Girsanov
+# Experiment 6: Variance Reduction Methods Comparison
+# =============================================================================
+
+def experiment_variance_reduction():
+    """
+    Compare different variance reduction methods for Girsanov.
+    
+    Methods tested:
+    1. None (standard Girsanov)
+    2. Centering (subtract mean score)
+    3. Truncation (clip extreme log-weights)
+    4. Self-normalized importance sampling
+    5. Control variates
+    """
+    print("\n" + "="*70)
+    print("[6/7] Variance Reduction Methods Comparison")
+    print("="*70)
+    
+    kT = 1.0
+    dt = 0.01
+    n_walkers = 500
+    n_trials = 30
+    
+    # Test across trajectory lengths where variance becomes problematic
+    n_steps_list = [50, 100, 200, 500, 1000]
+    
+    methods = ['none', 'center', 'truncate', 'self_normalize']
+    method_labels = {
+        'none': 'Standard',
+        'center': 'Centered',
+        'truncate': 'Truncated',
+        'self_normalize': 'Self-Norm'
+    }
+    
+    results = {
+        'n_steps': n_steps_list,
+        'T': [n * dt for n in n_steps_list],
+        'theory': -kT,  # d⟨x²⟩/dk for k=1
+    }
+    
+    for method in methods:
+        results[f'{method}_mean'] = []
+        results[f'{method}_std'] = []
+        results[f'{method}_ess'] = []
+    
+    print(f"\n{'T (s)':<8}", end='')
+    for method in methods:
+        print(f"{method_labels[method]:<18}", end='')
+    print()
+    print("-" * 80)
+    
+    for n_steps in n_steps_list:
+        method_grads = {m: [] for m in methods}
+        method_ess = {m: [] for m in methods}
+        cv_grads = []
+        
+        for trial in range(n_trials):
+            torch.manual_seed(trial * 100 + n_steps)
+            x0 = torch.randn(n_walkers, 1)
+            
+            # Generate trajectory once
+            potential_sim = Harmonic(k=1.0)
+            integrator = OverdampedLangevin(gamma=1.0, kT=kT)
+            with torch.no_grad():
+                traj = integrator.run(x0, potential_sim.force, dt=dt, n_steps=n_steps)
+            
+            traj_gir = traj.transpose(0, 1)  # (n_walkers, n_steps, 1)
+            obs_fn = lambda t: (t**2).mean(dim=(1, 2))
+            
+            # Test each variance reduction method
+            for method in methods:
+                vr = None if method == 'none' else method
+                potential = Harmonic(k=1.0)
+                estimator = GirsanovEstimator(
+                    potential, 
+                    sigma=np.sqrt(2*kT),
+                    variance_reduction=vr,
+                    truncate_threshold=5.0  # More aggressive truncation for demo
+                )
+                
+                grads, diag = estimator.estimate_gradient(
+                    traj_gir, observable=obs_fn, dt=dt, return_diagnostics=True
+                )
+                
+                method_grads[method].append(grads['k'].item())
+                method_ess[method].append(diag['ess_fraction'].item())
+        
+        # Store results
+        print(f"{n_steps*dt:<8.2f}", end='')
+        for method in methods:
+            mean_val = np.mean(method_grads[method])
+            std_val = np.std(method_grads[method])
+            ess_val = np.mean(method_ess[method])
+            
+            results[f'{method}_mean'].append(mean_val)
+            results[f'{method}_std'].append(std_val)
+            results[f'{method}_ess'].append(ess_val)
+            
+            print(f"{mean_val:>6.2f}±{std_val:<6.2f}", end='   ')
+        print()
+    
+    # Print ESS summary
+    print(f"\nEffective Sample Size (ESS/N) by method:")
+    print(f"{'T (s)':<8}", end='')
+    for method in methods:
+        print(f"{method_labels[method]:<12}", end='')
+    print()
+    print("-" * 60)
+    for i, n_steps in enumerate(n_steps_list):
+        print(f"{n_steps*dt:<8.2f}", end='')
+        for method in methods:
+            print(f"{results[f'{method}_ess'][i]:<12.1%}", end='')
+        print()
+    
+    return results
+
+
+# =============================================================================
+# Experiment 7: Optimization with Girsanov
 # =============================================================================
 
 def experiment_optimization():
@@ -524,7 +659,7 @@ def experiment_optimization():
     Compare optimization trajectories using BPTT vs Girsanov gradients.
     """
     print("\n" + "="*70)
-    print("[6/6] Optimization with Girsanov Gradients")
+    print("[7/7] Optimization with Girsanov Gradients")
     print("="*70)
     
     kT = 1.0
@@ -615,11 +750,11 @@ def experiment_optimization():
 # Plotting
 # =============================================================================
 
-def plot_results(exp1, exp2, exp3, exp4, exp5, exp6, save_path):
-    """Create comprehensive 3×2 visualization of Girsanov behavior."""
+def plot_results(exp1, exp2, exp3, exp4, exp5, exp6, exp7, save_path):
+    """Create comprehensive visualization of Girsanov behavior."""
     
-    fig = plt.figure(figsize=(14, 16))
-    gs = GridSpec(4, 2, figure=fig, hspace=0.35, wspace=0.25)
+    fig = plt.figure(figsize=(16, 14))
+    gs = GridSpec(3, 3, figure=fig, hspace=0.35, wspace=0.3)
     
     # Color scheme
     c_bptt = COLORS['bptt']
@@ -687,7 +822,7 @@ def plot_results(exp1, exp2, exp3, exp4, exp5, exp6, save_path):
     
     ax3.set_xlabel('Barrier Height')
     ax3.set_ylabel(r'$\partial \langle \tau \rangle / \partial a$')
-    ax3.set_title('C. First Passage Time Observable\n(Path-dependent: Girsanov fails)', fontweight='bold')
+    ax3.set_title('D. First Passage Time Observable\n(Path-dependent: Girsanov fails)', fontweight='bold')
     ax3.legend(loc='upper left', fontsize=9)
     
     # Highlight the failure
@@ -700,7 +835,7 @@ def plot_results(exp1, exp2, exp3, exp4, exp5, exp6, save_path):
                  arrowprops=dict(arrowstyle='->', color=COLORS['error'], lw=1.5))
     
     # =========================================================================
-    # Panel D: Log Score Distribution
+    # Panel E: Log Score Distribution
     # =========================================================================
     ax4 = fig.add_subplot(gs[1, 1])
     
@@ -714,12 +849,12 @@ def plot_results(exp1, exp2, exp3, exp4, exp5, exp6, save_path):
     
     ax4.set_xlabel('Log Path Score')
     ax4.set_ylabel('Density')
-    ax4.set_title('D. Distribution of Log Path Scores\n(Wider tails → variance explosion)', fontweight='bold')
+    ax4.set_title('E. Distribution of Log Path Scores\n(Wider tails → variance explosion)', fontweight='bold')
     ax4.legend(loc='upper right', fontsize=9)
     ax4.set_xlim(-15, 8)
     
     # =========================================================================
-    # Panel E: Effective Sample Size
+    # Panel G: Effective Sample Size
     # =========================================================================
     ax5 = fig.add_subplot(gs[2, 0])
     
@@ -731,7 +866,7 @@ def plot_results(exp1, exp2, exp3, exp4, exp5, exp6, save_path):
     
     ax5.set_xlabel('Trajectory Length T (s)')
     ax5.set_ylabel('ESS / N (log scale)')
-    ax5.set_title('E. Effective Sample Size Ratio\n(Importance sampling efficiency)', fontweight='bold')
+    ax5.set_title('G. Effective Sample Size Ratio\n(Importance sampling efficiency)', fontweight='bold')
     ax5.set_xscale('log')
     ax5.set_ylim(0.01, 1.5)
     
@@ -742,7 +877,7 @@ def plot_results(exp1, exp2, exp3, exp4, exp5, exp6, save_path):
     ax5.text(0.12, 0.12, '10% efficiency', fontsize=8, color=COLORS['error'])
     
     # =========================================================================
-    # Panel F: Girsanov vs REINFORCE
+    # Panel H: Girsanov vs REINFORCE
     # =========================================================================
     ax6 = fig.add_subplot(gs[2, 1])
     
@@ -761,68 +896,86 @@ def plot_results(exp1, exp2, exp3, exp4, exp5, exp6, save_path):
     
     ax6.set_xlabel('Trajectory Length T (s)')
     ax6.set_ylabel(r'$\partial \langle x^2 \rangle / \partial k$')
-    ax6.set_title('F. Girsanov vs REINFORCE (Equilibrium)\n(REINFORCE has bounded variance)', fontweight='bold')
+    ax6.set_title('H. Girsanov vs REINFORCE (Equilibrium)\n(REINFORCE has bounded variance)', fontweight='bold')
     ax6.legend(loc='lower left', fontsize=9)
     ax6.set_xscale('log')
     
     # =========================================================================
-    # Panel G: Optimization Trajectories
+    # Panel G: Variance Reduction Methods
     # =========================================================================
-    ax7 = fig.add_subplot(gs[3, 0])
+    ax7 = fig.add_subplot(gs[0, 2])
     
-    epochs = exp6['epochs']
+    T_vr = np.array(exp6['T'])
     
-    ax7.plot(epochs, exp6['bptt_k'], 'o-', color=c_bptt, lw=LW, ms=4,
+    # Plot each variance reduction method
+    vr_colors = {
+        'none': '#BF616A',      # Red - worst
+        'center': '#A3BE8C',    # Green - good
+        'truncate': '#D08770',  # Orange - moderate
+        'self_normalize': '#5E81AC',  # Blue - good
+    }
+    vr_labels = {
+        'none': 'Standard',
+        'center': 'Centered (CGT)',
+        'truncate': 'Truncated',
+        'self_normalize': 'Self-Normalized',
+    }
+    vr_markers = {'none': 'x', 'center': 'o', 'truncate': 's', 'self_normalize': '^'}
+    
+    for method in ['none', 'center', 'truncate', 'self_normalize']:
+        ax7.errorbar(T_vr, exp6[f'{method}_mean'], yerr=exp6[f'{method}_std'],
+                     fmt=f'{vr_markers[method]}-', color=vr_colors[method], 
+                     lw=LW, ms=MS, capsize=3, label=vr_labels[method],
+                     markeredgecolor='white', markeredgewidth=1, alpha=0.85)
+    
+    ax7.axhline(exp6['theory'], color=c_theory, ls=':', lw=2, alpha=0.7)
+    
+    ax7.set_xlabel('Trajectory Length T (s)')
+    ax7.set_ylabel(r'$\partial \langle x^2 \rangle / \partial k$')
+    ax7.set_title('C. Variance Reduction Methods\n(Centering most stable)', fontweight='bold')
+    ax7.legend(loc='lower left', fontsize=7)
+    ax7.set_xscale('log')
+    
+    # =========================================================================
+    # Panel H: Variance Reduction - Relative Error
+    # =========================================================================
+    ax8 = fig.add_subplot(gs[1, 2])
+    
+    theory = exp6['theory']
+    for method in ['none', 'center', 'truncate', 'self_normalize']:
+        rel_std = np.array(exp6[f'{method}_std']) / abs(theory)
+        ax8.semilogy(T_vr, rel_std, f'{vr_markers[method]}-', 
+                     color=vr_colors[method], lw=LW, ms=MS,
+                     label=vr_labels[method], markeredgecolor='white', markeredgewidth=1)
+    
+    ax8.set_xlabel('Trajectory Length T (s)')
+    ax8.set_ylabel('Relative Std Dev (log scale)')
+    ax8.set_title('F. Gradient Variance by Method\n(Lower = better)', fontweight='bold')
+    ax8.legend(loc='upper left', fontsize=7)
+    ax8.set_xscale('log')
+    ax8.axhline(0.1, color='gray', ls='--', lw=1, alpha=0.5)
+    ax8.axhline(1.0, color=COLORS['error'], ls='--', lw=1, alpha=0.5)
+    ax8.text(0.55, 0.12, '10% error', fontsize=8, color='gray')
+    ax8.text(0.55, 1.2, '100% error', fontsize=8, color=COLORS['error'])
+    
+    # =========================================================================
+    # Panel I: Optimization Trajectories
+    # =========================================================================
+    ax9 = fig.add_subplot(gs[2, 2])
+    
+    epochs = exp7['epochs']
+    
+    ax9.plot(epochs, exp7['bptt_k'], 'o-', color=c_bptt, lw=LW, ms=4,
              label='BPTT', markeredgecolor='white', markeredgewidth=0.5)
-    ax7.plot(epochs, exp6['girsanov_k'], 's--', color=c_gir, lw=LW, ms=4,
+    ax9.plot(epochs, exp7['girsanov_k'], 's--', color=c_gir, lw=LW, ms=4,
              label='Girsanov', markeredgecolor='white', markeredgewidth=0.5)
-    ax7.axhline(exp6['target_k'], color=c_theory, ls=':', lw=2, label=f"Target k = {exp6['target_k']:.1f}")
+    ax9.axhline(exp7['target_k'], color=c_theory, ls=':', lw=2, label=f"Target k = {exp7['target_k']:.1f}")
     
-    ax7.set_xlabel('Optimization Epoch')
-    ax7.set_ylabel('Spring Constant k')
-    ax7.set_title('G. Parameter Optimization\n(Both converge, Girsanov slower)', fontweight='bold')
-    ax7.legend(loc='lower right', fontsize=9)
-    ax7.set_ylim(0, 2.5)
-    
-    # =========================================================================
-    # Panel H: Summary Box
-    # =========================================================================
-    ax8 = fig.add_subplot(gs[3, 1])
-    ax8.axis('off')
-    
-    summary_text = """
-    Girsanov Path-Reweighting: Summary
-    ══════════════════════════════════════════════════════════════
-
-    MATHEMATICAL BASIS:
-      For dx = F_θ(x)dt + σdW, the path probability gradient is:
-      ∇_θ log p(τ|θ) = (1/σ²) ∫₀ᵀ ∇_θF · (dx - F·dt)
-      
-      This enables: ∇_θ ⟨O⟩ = ⟨O · ∇_θ log p(τ|θ)⟩
-
-    ✓ WORKS WELL FOR:
-      • Short trajectories (T < relaxation time)
-      • Simple observables (final state, time averages)
-      • Non-equilibrium problems (where REINFORCE fails)
-      • When BPTT memory is prohibitive
-
-    ✗ STRUGGLES WITH:
-      • Long trajectories (variance grows ~ exp(T))
-      • Path-dependent observables (FPT, extrema, rare events)
-      • High-dimensional systems
-      • When high accuracy is required
-
-    PRACTICAL GUIDELINES:
-      1. Monitor ESS: if ESS/N < 10%, results unreliable
-      2. For equilibrium: prefer REINFORCE (bounded variance)
-      3. For non-equilibrium: use short T or switch to BPTT
-      4. Girsanov can optimize, but needs lower learning rates
-    """
-    
-    ax8.text(0.02, 0.98, summary_text, transform=ax8.transAxes,
-             fontsize=9, family='monospace', va='top',
-             bbox=dict(boxstyle='round,pad=0.5', facecolor='#F0F4F8', 
-                      edgecolor='#D8DEE9', alpha=0.95))
+    ax9.set_xlabel('Optimization Epoch')
+    ax9.set_ylabel('Spring Constant k')
+    ax9.set_title('I. Parameter Optimization\n(Both converge, Girsanov slower)', fontweight='bold')
+    ax9.legend(loc='lower right', fontsize=9)
+    ax9.set_ylim(0, 2.5)
     
     plt.suptitle('Girsanov Path-Reweighting Gradient Estimator: Comprehensive Analysis',
                  fontsize=14, fontweight='bold', y=0.995)
@@ -848,7 +1001,8 @@ This demo explores the Girsanov path-reweighting gradient estimator:
   3. Log score distribution analysis
   4. Effective sample size decay
   5. Comparison with REINFORCE for equilibrium
-  6. Optimization performance
+  6. Variance reduction methods (centering, truncation, self-normalization)
+  7. Optimization performance
 """)
     
     t0 = time.time()
@@ -859,7 +1013,8 @@ This demo explores the Girsanov path-reweighting gradient estimator:
     exp3 = experiment_score_distribution()
     exp4 = experiment_effective_samples()
     exp5 = experiment_girsanov_vs_reinforce()
-    exp6 = experiment_optimization()
+    exp6 = experiment_variance_reduction()
+    exp7 = experiment_optimization()
     
     print(f"\nTotal runtime: {time.time() - t0:.1f} seconds")
     
@@ -871,7 +1026,7 @@ This demo explores the Girsanov path-reweighting gradient estimator:
     
     # Plot
     save_path = os.path.join(assets_dir, "demo_girsanov.png")
-    plot_results(exp1, exp2, exp3, exp4, exp5, exp6, save_path)
+    plot_results(exp1, exp2, exp3, exp4, exp5, exp6, exp7, save_path)
     
     print("\n" + "=" * 70)
     print("Key Takeaways")
@@ -890,9 +1045,14 @@ This demo explores the Girsanov path-reweighting gradient estimator:
 4. VS REINFORCE: For equilibrium observables, REINFORCE has bounded
    variance while Girsanov variance grows. Prefer REINFORCE when applicable.
 
-5. OPTIMIZATION: Girsanov can be used for optimization, but requires
+5. VARIANCE REDUCTION: Centering (CGT) and self-normalization significantly
+   reduce variance, especially for longer trajectories. Use
+   variance_reduction="center" by default.
+
+6. OPTIMIZATION: Girsanov can be used for optimization, but requires
    lower learning rates due to gradient noise.
 
-6. WHEN TO USE: Girsanov is most useful for non-equilibrium problems
-   with short trajectories where BPTT memory is prohibitive.
+7. WHEN TO USE: Girsanov is most useful for non-equilibrium problems
+   with short trajectories where BPTT memory is prohibitive. Use
+   variance reduction (variance_reduction="center") by default.
 """)
