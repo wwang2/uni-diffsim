@@ -47,40 +47,20 @@ for i in range(n_chains):
     else:
         print(f"Chain {i}: stable (r ∈ [{r[:, i].min():.1f}, {r[:, i].max():.1f}])")
 
-# Plotting style (Nord-inspired, editorial)
-plt.rcParams.update({
-    "font.family": "monospace",
-    "font.monospace": ["JetBrains Mono", "DejaVu Sans Mono", "Menlo", "Monaco"],
-    "font.size": 11,
-    "axes.titlesize": 12,
-    "axes.labelsize": 11,
-    "xtick.labelsize": 10,
-    "ytick.labelsize": 10,
-    "legend.fontsize": 9,
-    "axes.grid": True,
-    "grid.alpha": 0.2,
-    "grid.linewidth": 0.5,
-    "axes.spines.top": False,
-    "axes.spines.right": False,
-    "axes.titlepad": 8.0,
-    "axes.labelpad": 5.0,
-    "xtick.direction": "out",
-    "ytick.direction": "out",
-    "legend.frameon": True,
-    "legend.framealpha": 0.95,
-    "legend.edgecolor": '0.9',
-    "figure.facecolor": "#FAFBFC",
-    "axes.facecolor": "#FFFFFF",
-    "savefig.facecolor": "#FAFBFC",
-    "lines.linewidth": 2.0,
-})
+# Import shared plotting style
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from uni_diffsim.plotting import apply_style, COLORS as BASE_COLORS
 
-# Color palette
+# Apply shared plotting style
+apply_style()
+
+# Extend color palette for this script
 COLORS = {
-    'ESH': '#B48EAD',          # Lavender
-    'Theory': '#4C566A',       # Slate gray
-    'Trajectory': '#88C0D0',     # Cyan
-    'Error': '#BF616A',          # Red
+    'ESH': BASE_COLORS['esh'],
+    'Theory': BASE_COLORS['theory'],
+    'Trajectory': BASE_COLORS['trajectory'],
+    'Error': BASE_COLORS['error'],
 }
 
 # Plot
@@ -108,6 +88,6 @@ ax.set_xlim(-3, 3)
 ax.set_ylim(-3, 3)
 
 plt.tight_layout()
-plt.savefig('assets/esh_debug.png', dpi=150, facecolor='#FAFBFC')
-print(f"\nSaved: assets/esh_debug.png")
+plt.savefig('assets/debug_esh_instability.png', dpi=150, facecolor='#FAFBFC')
+print(f"\nSaved: assets/debug_esh_instability.png")
 

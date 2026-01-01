@@ -36,48 +36,10 @@ from uni_diffsim import (
     DoubleWell, AsymmetricDoubleWell, Harmonic,
     ReinforceEstimator, ImplicitDiffEstimator,
 )
+from uni_diffsim.plotting import apply_style, COLORS
 
-# Plotting settings (Nord-inspired, editorial)
-plt.rcParams.update({
-    "font.family": "monospace",
-    "font.monospace": ["JetBrains Mono", "DejaVu Sans Mono", "Menlo", "Monaco"],
-    "font.size": 11,
-    "axes.titlesize": 12,
-    "axes.labelsize": 11,
-    "xtick.labelsize": 10,
-    "ytick.labelsize": 10,
-    "legend.fontsize": 9,
-    "axes.grid": True,
-    "grid.alpha": 0.2,
-    "grid.linewidth": 0.5,
-    "axes.spines.top": False,
-    "axes.spines.right": False,
-    "axes.titlepad": 8.0,
-    "axes.labelpad": 5.0,
-    "xtick.direction": "out",
-    "ytick.direction": "out",
-    "legend.frameon": True,
-    "legend.framealpha": 0.95,
-    "legend.edgecolor": '0.9',
-    "figure.facecolor": "#FAFBFC",
-    "axes.facecolor": "#FFFFFF",
-    "savefig.facecolor": "#FAFBFC",
-    "lines.linewidth": 2.0,
-})
-
-# Color palette (Nord-inspired)
-COLORS = {
-    'overdamped': '#5E81AC',   # Steel blue
-    'baoab': '#A3BE8C',        # Sage green
-    'theory': '#4C566A',       # Slate gray
-    'target': '#BF616A',       # Muted red
-    'optimal': '#B48EAD',      # Lavender
-    'neural': '#88C0D0',       # Cyan
-    'barrier': '#D08770',      # Warm orange
-    'bptt': '#D08770',         # Warm orange
-    'reinforce': '#5E81AC',    # Steel blue
-    'implicit': '#A3BE8C',     # Sage green
-}
+# Apply shared plotting style
+apply_style()
 
 LW = 2.0
 MS = 6
@@ -963,7 +925,7 @@ if __name__ == "__main__":
     control_results = demo_optimal_control()
 
     # Plot results
-    save_path = os.path.join(assets_dir, "nonequilibrium_demos.png")
+    save_path = os.path.join(assets_dir, "demo_nonequilibrium.png")
     fig = plot_results(fpt_results, trans_results, control_results, save_path)
 
     # Summary

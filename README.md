@@ -31,7 +31,7 @@ pip install -e ".[dev]"
 
 ## Gradient Estimators
 
-![Gradient Methods Comparison](assets/gradient_methods_comparison.png)
+![Gradient Estimators Comparison](assets/demo_gradient_estimators.png)
 
 Three approaches for computing gradients through stochastic simulations:
 
@@ -52,12 +52,12 @@ The REINFORCE estimator uses the thermodynamic perturbation theory identity:
 - **Trade-off**: BPTT is universal but memory-intensive; REINFORCE/Implicit are O(1) memory but restricted to equilibrium observables
 
 ```bash
-python scripts/gradient_methods_comparison.py  # Generate the comparison plot
+python scripts/demo_gradient_estimators.py  # Generate the comparison plot
 ```
 
 ## Adjoint Methods (implemented for Nose hoover)
 
-![Nosé-Hoover Adjoint](assets/nosehoover_adjoint.png)
+![Nosé-Hoover Adjoint](assets/demo_nosehoover_adjoint.png)
 
 For deterministic thermostats like Nosé-Hoover, we provide specialized adjoint methods:
 
@@ -72,7 +72,7 @@ For deterministic thermostats like Nosé-Hoover, we provide specialized adjoint 
 **Key findings**:
 - **Discrete adjoint matches BPTT to machine precision** (~10⁻⁷ relative error)
 - **Continuous adjoint has O(dt) error** (~5-15% at dt=0.01, decreases linearly with dt)
-- Both methods enable gradient-based optimization of thermostat parameters (kT, mass, Q)
+- **Both methods enable gradient-based optimization of thermostat parameters** (kT, mass, Q)
 
 ```python
 from uni_diffsim.gradient_estimators import DiscreteAdjointNoseHoover
@@ -88,12 +88,12 @@ grads = integrator.adjoint_backward([loss_grad], [None], traj_x, traj_v, traj_al
 ```
 
 ```bash
-python scripts/nosehoover_adjoint_demo.py  # Generate the adjoint comparison plot
+python scripts/demo_nosehoover_adjoint.py  # Generate the adjoint comparison plot
 ```
 
 ## Forward-Mode Sensitivity Analysis
 
-![Gradient Method Benchmark](assets/grad_method_benchmark.png)
+![Forward vs Adjoint Benchmark](assets/benchmark_forward_vs_adjoint.png)
 
 Comparison of forward-mode AD against reverse-mode methods for computing parameter sensitivities:
 
@@ -118,21 +118,8 @@ estimator = ForwardSensitivityEstimator(integrator, param_names=['kT'])
 ```
 
 ```bash
-python scripts/compare_gradients.py  # Generate the benchmark plot
+python scripts/benchmark_forward_vs_adjoint.py  # Generate the benchmark plot
 ```
-
-## Potentials
-
-![Potentials](assets/potentials.png)
-
-| Potential | Dim | Use |
-|-----------|-----|-----|
-| `DoubleWell` | 1D | Barrier crossing |
-| `AsymmetricDoubleWell` | 1D | Metastable populations |
-| `MullerBrown` | 2D | Reaction paths |
-| `LennardJones` | N×d | Clusters |
-| `Harmonic` | d | Reference |
-
 
 ## Usage
 
@@ -166,4 +153,3 @@ x.sum().backward()  # k.grad is defined
 ```bash
 pytest tests/ -v
 ```
-

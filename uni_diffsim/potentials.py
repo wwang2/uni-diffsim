@@ -82,7 +82,7 @@ class DoubleWell(Potential):
     
     def __init__(self, barrier_height: float = 1.0):
         super().__init__()
-        self.barrier_height = nn.Parameter(torch.tensor(barrier_height))
+        self.barrier_height = nn.Parameter(torch.tensor(barrier_height, dtype=torch.float32))
     
     def energy(self, x: torch.Tensor) -> torch.Tensor:
         if x.shape[-1:] == (1,):
@@ -117,8 +117,8 @@ class AsymmetricDoubleWell(Potential):
 
     def __init__(self, barrier_height: float = 1.0, asymmetry: float = 0.0):
         super().__init__()
-        self.barrier_height = nn.Parameter(torch.tensor(barrier_height))
-        self.asymmetry = nn.Parameter(torch.tensor(asymmetry))
+        self.barrier_height = nn.Parameter(torch.tensor(barrier_height, dtype=torch.float32))
+        self.asymmetry = nn.Parameter(torch.tensor(asymmetry, dtype=torch.float32))
 
     def energy(self, x: torch.Tensor) -> torch.Tensor:
         if x.shape[-1:] == (1,):
@@ -132,8 +132,8 @@ class AsymmetricDoubleWell(Potential):
         Returns (U_left, U_right).
         """
         # Approximate well positions (exact for b=0)
-        x_left = torch.tensor(-1.0)
-        x_right = torch.tensor(1.0)
+        x_left = torch.tensor(-1.0, dtype=torch.float32)
+        x_right = torch.tensor(1.0, dtype=torch.float32)
         return self.energy(x_left), self.energy(x_right)
 
 
@@ -152,8 +152,8 @@ class DoubleWell2D(Potential):
     
     def __init__(self, barrier_height: float = 1.0, k_y: float = 1.0):
         super().__init__()
-        self.barrier_height = nn.Parameter(torch.tensor(barrier_height))
-        self.k_y = nn.Parameter(torch.tensor(k_y))
+        self.barrier_height = nn.Parameter(torch.tensor(barrier_height, dtype=torch.float32))
+        self.k_y = nn.Parameter(torch.tensor(k_y, dtype=torch.float32))
     
     def energy(self, xy: torch.Tensor) -> torch.Tensor:
         x, y = xy[..., 0], xy[..., 1]
@@ -171,12 +171,12 @@ class MullerBrown(Potential):
     """
     
     # Standard parameter values
-    _A_default = torch.tensor([-200., -100., -170., 15.])
-    _a_default = torch.tensor([-1., -1., -6.5, 0.7])
-    _b_default = torch.tensor([0., 0., 11., 0.6])
-    _c_default = torch.tensor([-10., -10., -6.5, 0.7])
-    _x0_default = torch.tensor([1., 0., -0.5, -1.])
-    _y0_default = torch.tensor([0., 0.5, 1.5, 1.])
+    _A_default = torch.tensor([-200., -100., -170., 15.], dtype=torch.float32)
+    _a_default = torch.tensor([-1., -1., -6.5, 0.7], dtype=torch.float32)
+    _b_default = torch.tensor([0., 0., 11., 0.6], dtype=torch.float32)
+    _c_default = torch.tensor([-10., -10., -6.5, 0.7], dtype=torch.float32)
+    _x0_default = torch.tensor([1., 0., -0.5, -1.], dtype=torch.float32)
+    _y0_default = torch.tensor([0., 0.5, 1.5, 1.], dtype=torch.float32)
     
     def __init__(self, 
                  A: torch.Tensor | None = None,
@@ -186,12 +186,12 @@ class MullerBrown(Potential):
                  x0: torch.Tensor | None = None,
                  y0: torch.Tensor | None = None):
         super().__init__()
-        self.A = nn.Parameter(A.clone() if A is not None else self._A_default.clone())
-        self.a = nn.Parameter(a.clone() if a is not None else self._a_default.clone())
-        self.b = nn.Parameter(b.clone() if b is not None else self._b_default.clone())
-        self.c = nn.Parameter(c.clone() if c is not None else self._c_default.clone())
-        self.x0 = nn.Parameter(x0.clone() if x0 is not None else self._x0_default.clone())
-        self.y0 = nn.Parameter(y0.clone() if y0 is not None else self._y0_default.clone())
+        self.A = nn.Parameter(A.float().clone() if A is not None else self._A_default.clone())
+        self.a = nn.Parameter(a.float().clone() if a is not None else self._a_default.clone())
+        self.b = nn.Parameter(b.float().clone() if b is not None else self._b_default.clone())
+        self.c = nn.Parameter(c.float().clone() if c is not None else self._c_default.clone())
+        self.x0 = nn.Parameter(x0.float().clone() if x0 is not None else self._x0_default.clone())
+        self.y0 = nn.Parameter(y0.float().clone() if y0 is not None else self._y0_default.clone())
     
     def energy(self, xy: torch.Tensor) -> torch.Tensor:
         """xy: (..., 2) -> (...)"""
@@ -226,14 +226,14 @@ class LennardJones(Potential):
     def __init__(self, eps: float = 1.0, sigma: float = 1.0, 
                  box_size: float | torch.Tensor | None = None):
         super().__init__()
-        self.eps = nn.Parameter(torch.tensor(eps))
-        self.sigma = nn.Parameter(torch.tensor(sigma))
+        self.eps = nn.Parameter(torch.tensor(eps, dtype=torch.float32))
+        self.sigma = nn.Parameter(torch.tensor(sigma, dtype=torch.float32))
         
         if box_size is not None:
             if isinstance(box_size, (int, float)):
-                box_size = torch.tensor([box_size])
+                box_size = torch.tensor([box_size], dtype=torch.float32)
             elif not isinstance(box_size, torch.Tensor):
-                box_size = torch.tensor(box_size)
+                box_size = torch.tensor(box_size, dtype=torch.float32)
             self.register_buffer("box_size", box_size.float())
         else:
             self.box_size = None
@@ -457,9 +457,9 @@ class Harmonic(Potential):
     
     def __init__(self, k: float = 1.0, center: torch.Tensor | None = None):
         super().__init__()
-        self.k = nn.Parameter(torch.tensor(k))
+        self.k = nn.Parameter(torch.tensor(k, dtype=torch.float32))
         if center is not None:
-            self.center = nn.Parameter(center.clone())
+            self.center = nn.Parameter(center.float().clone())
         else:
             self.center = None
     
@@ -470,150 +470,70 @@ class Harmonic(Potential):
 
 
 if __name__ == "__main__":
-    import os
+    """Quick sanity check for potentials."""
     import numpy as np
-    import matplotlib.pyplot as plt
     
-    # Plotting style (Nord-inspired, editorial)
-    plt.rcParams.update({
-        "font.family": "monospace",
-        "font.monospace": ["JetBrains Mono", "DejaVu Sans Mono", "Menlo", "Monaco"],
-        "font.size": 11,
-        "axes.titlesize": 12,
-        "axes.labelsize": 11,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
-        "legend.fontsize": 9,
-        "axes.grid": True,
-        "grid.alpha": 0.2,
-        "grid.linewidth": 0.5,
-        "axes.spines.top": False,
-        "axes.spines.right": False,
-        "axes.titlepad": 8.0,
-        "axes.labelpad": 5.0,
-        "xtick.direction": "out",
-        "ytick.direction": "out",
-        "legend.frameon": True,
-        "legend.framealpha": 0.95,
-        "legend.edgecolor": '0.9',
-        "figure.facecolor": "#FAFBFC",
-        "axes.facecolor": "#FFFFFF",
-        "savefig.facecolor": "#FAFBFC",
-        "lines.linewidth": 2.0,
-    })
+    print("Potentials sanity check...")
     
-    assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
-    os.makedirs(assets_dir, exist_ok=True)
+    # DoubleWell
+    dw = DoubleWell(barrier_height=1.0)
+    x = torch.tensor([0.0, 1.0, -1.0])
+    u = dw.energy(x)
+    assert u[0] > u[1], "Barrier should be higher than wells"
+    assert torch.allclose(u[1], u[2]), "Wells should be symmetric"
+    print(f"  DoubleWell: U(0)={u[0]:.2f}, U(±1)={u[1]:.2f}")
     
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8), constrained_layout=True)
-    fig.patch.set_facecolor('#FAFBFC')
+    # AsymmetricDoubleWell
+    adw = AsymmetricDoubleWell(barrier_height=1.0, asymmetry=0.5)
+    u_left, u_right = adw.well_depths()
+    assert u_left < u_right, "Left well should be lower with positive asymmetry"
+    print(f"  AsymmetricDoubleWell: U_left={u_left:.2f}, U_right={u_right:.2f}")
     
-    # Common colormap and style
-    cmap = 'BuPu'
-    particle_color = '#5E81AC'  # Steel blue from Nord palette
+    # DoubleWell2D
+    dw2d = DoubleWell2D()
+    xy = torch.tensor([[0.0, 0.0], [1.0, 0.0], [-1.0, 0.0]])
+    u = dw2d.energy(xy)
+    assert u[0] > u[1], "Saddle should be higher than minima"
+    print(f"  DoubleWell2D: U(saddle)={u[0]:.2f}, U(minima)={u[1]:.2f}")
     
-    # 1. Double Well 2D
-    ax = axes[0, 0]
-    dw = DoubleWell2D()
-    x = torch.linspace(-2.5, 2.5, 100)
-    y = torch.linspace(-2.0, 2.0, 100)
-    X, Y = torch.meshgrid(x, y, indexing='ij')
-    xy = torch.stack([X, Y], dim=-1)
-    U = dw.energy(xy)
-    
-    # Levels for DoubleWell2D
-    levels = np.linspace(0, 5, 21)
-    U_clipped = torch.clamp(U, max=5.0)
-    
-    cs = ax.contourf(X.numpy(), Y.numpy(), U_clipped.detach().numpy(), levels=levels, cmap=cmap, extend='max')
-    ax.contour(X.numpy(), Y.numpy(), U_clipped.detach().numpy(), levels=levels, colors='k', linewidths=0.3, alpha=0.5)
-    ax.set_xlabel('x')
-    ax.set_ylabel('y')
-    ax.set_title('Double Well 2D', fontweight='bold')
-    plt.colorbar(cs, ax=ax, label='U')
-    ax.set_axisbelow(True)
-    
-    # 2. Müller-Brown contour
-    ax = axes[0, 1]
+    # MullerBrown
     mb = MullerBrown()
-    x = torch.linspace(-1.5, 1.2, 100)
-    y = torch.linspace(-0.5, 2.0, 100)
-    X, Y = torch.meshgrid(x, y, indexing='ij')
-    xy = torch.stack([X, Y], dim=-1)
-    U = mb.energy(xy)
+    xy = torch.tensor([[0.6, 0.0], [-0.5, 1.5]])  # Near two minima
+    u = mb.energy(xy)
+    print(f"  MullerBrown: U at two points = {u[0]:.1f}, {u[1]:.1f}")
     
-    # Levels for DoubleWell2D (fixed comment)
-    levels = np.linspace(-150, 100, 26)
-    U_clipped = torch.clamp(U, max=100.0)
+    # LennardJones
+    lj = LennardJones(eps=1.0, sigma=1.0)
+    # Two particles at equilibrium distance (r = 2^(1/6) * sigma)
+    r_eq = 2**(1/6)
+    pos = torch.tensor([[0.0, 0.0], [r_eq, 0.0]])
+    u = lj.energy(pos)
+    assert u < 0, "LJ should be negative at equilibrium"
+    print(f"  LennardJones: U(r_eq)={u:.3f} (should be -1)")
     
-    cs = ax.contourf(X.numpy(), Y.numpy(), U_clipped.detach().numpy(), levels=levels, cmap=cmap, extend='max')
-    ax.contour(X.numpy(), Y.numpy(), U_clipped.detach().numpy(), levels=levels, colors='k', linewidths=0.3, alpha=0.5)
-    ax.set_xlabel('x')
-    ax.set_ylabel('y')
-    ax.set_title('Müller-Brown', fontweight='bold')
-    plt.colorbar(cs, ax=ax, label='U')
-    ax.set_axisbelow(True)
+    # LennardJones with PBC
+    lj_pbc = LennardJones(eps=1.0, sigma=1.0, box_size=5.0)
+    pos = torch.tensor([[0.0, 0.0], [4.5, 0.0]])  # Close via PBC
+    u_pbc = lj_pbc.energy(pos)
+    print(f"  LennardJones (PBC): U={u_pbc:.3f} (particles wrap around)")
     
-    # 3. LJ-7 cluster (no PBC)
-    ax = axes[1, 0]
-    lj = LennardJones()
-    angles = torch.linspace(0, 2*np.pi, 7)[:-1]
-    r = 1.12
-    positions = torch.zeros(7, 2)
-    positions[1:, 0] = r * torch.cos(angles)
-    positions[1:, 1] = r * torch.sin(angles)
+    # Harmonic
+    h = Harmonic(k=2.0)
+    x = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    u = h.energy(x)
+    assert torch.allclose(u, torch.tensor([1.0, 1.0])), "U = 0.5 * k * x^2"
+    print(f"  Harmonic: U(1,0)={u[0]:.2f}")
     
-    ax.scatter(positions[:, 0].numpy(), positions[:, 1].numpy(), 
-               s=500, c=particle_color, edgecolor='k', lw=1.5, zorder=10)
-    ax.set_xlim(-2.5, 2.5)
-    ax.set_ylim(-2.5, 2.5)
-    ax.set_aspect('equal')
-    ax.set_title(f'LJ-7 cluster (U={lj.energy(positions).item():.2f})', fontweight='bold')
-    ax.set_xlabel('x')
-    ax.set_ylabel('y')
-    ax.set_axisbelow(True)
+    # Test forces (autograd)
+    x = torch.tensor([[1.0, 0.0]], requires_grad=True)
+    f = dw2d.force(x)
+    assert f.shape == x.shape
+    print(f"  Force computation: OK")
     
-    # 4. LJ cluster with periodic boundary conditions
-    ax = axes[1, 1]
-    L = 4.0  # box size
-    lj_pbc = LennardJones(box_size=L)
+    # Test Hessian
+    x = torch.tensor([0.5, 0.5])
+    H = dw2d.hessian(x)
+    assert H.shape == (2, 2)
+    print(f"  Hessian computation: OK, shape={H.shape}")
     
-    # Create a 3x3 grid of particles in the box
-    n_side = 3
-    spacing = L / n_side
-    pos_pbc = torch.zeros(n_side * n_side, 2)
-    idx = 0
-    for i in range(n_side):
-        for j in range(n_side):
-            pos_pbc[idx, 0] = (i + 0.5) * spacing
-            pos_pbc[idx, 1] = (j + 0.5) * spacing
-            idx += 1
-    
-    # Draw the periodic box
-    box = plt.Rectangle((0, 0), L, L, fill=False, edgecolor='#333', lw=2, ls='--')
-    ax.add_patch(box)
-    
-    # Draw ghost images (periodic copies) in faded color
-    for dx in [-L, 0, L]:
-        for dy in [-L, 0, L]:
-            if dx == 0 and dy == 0:
-                continue  # skip the main box
-            ghost_pos = pos_pbc + torch.tensor([dx, dy])
-            ax.scatter(ghost_pos[:, 0].numpy(), ghost_pos[:, 1].numpy(),
-                      s=200, c=particle_color, alpha=0.2, edgecolor='none', zorder=5)
-    
-    # Draw main particles
-    ax.scatter(pos_pbc[:, 0].numpy(), pos_pbc[:, 1].numpy(),
-               s=400, c=particle_color, edgecolor='k', lw=1.5, zorder=10)
-    
-    ax.set_xlim(-L*0.5, L*1.5)
-    ax.set_ylim(-L*0.5, L*1.5)
-    ax.set_aspect('equal')
-    ax.set_title(f'LJ-9 with PBC (L={L}, U={lj_pbc.energy(pos_pbc).item():.2f})', fontweight='bold')
-    ax.set_xlabel('x')
-    ax.set_ylabel('y')
-    ax.set_axisbelow(True)
-    
-    plt.savefig(os.path.join(assets_dir, "potentials.png"), dpi=150, 
-                bbox_inches='tight', facecolor='#FAFBFC')
-    print(f"Saved potentials plot to assets/potentials.png")
+    print("\nAll potentials passed sanity check!")
