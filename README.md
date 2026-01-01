@@ -1,11 +1,19 @@
 
-# on unifying differentiable simulations
+# Many Paths to Simulation Gradients
 
 > “All chaos is order misunderstood.”    — Alexander Pope
 
 This project explores a question I've wondered about for years:
 
 > What does it mean to "differentiate through simulation"?
+
+When we seek the gradient of an expectation, we stand at a curious crossroads. Do we follow a single trajectory and watch it bend? Or do we let go of the path entirely, trusting only in the statistics of many possible worlds?
+
+This is the tension at the heart of differentiable simulation: **the path versus the ensemble**, **memory versus forgetting**, **the forward arrow of time versus the backward whisper of sensitivity**.
+
+Consider: a trajectory remembers everything—every fluctuation, every collision, every choice the noise made. An equilibrium distribution remembers nothing—it has forgotten its history, settled into timeless statistics. When we differentiate, we must choose which story to tell.
+
+This document acts as an **atlas** to this landscape. It is not just a technical manual, but a meditation on **what it means to ask "what if?" of a dynamical system**. We explore how diverse methods—pathwise (BPTT), score function (REINFORCE), path reweighting (Girsanov)—occupy different regions of applicability.
 
 
 ```bash
