@@ -8,10 +8,12 @@ and optimization trajectories in insets.
 
 Grid Structure:
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ ROWS: Gradient Methods                                                  │
-│   1. BPTT (Backprop Through Time)                                       │
-│   2. REINFORCE                                                          │
-│   3. Implicit Differentiation                                           │
+│ ROWS:                                                                   │
+│   1. Problem Setting (Schematic)                                        │
+│   2. BPTT (Backprop Through Time)                                       │
+│   3. REINFORCE                                                          │
+│   4. Implicit Differentiation                                           │
+│   5. Girsanov (Path Reweighting)                                        │
 │                                                                         │
 │ COLUMNS: Systems                                                        │
 │   1. Harmonic (Equilibrium)                                             │
@@ -880,10 +882,86 @@ def run_optimal_control():
 # Plotting
 # =============================================================================
 
-def plot_comprehensive_comparison(results_list, save_path):
-    """Create a 4×5 grid: methods (rows) × systems (columns)."""
+def plot_system_schematic(ax, system_name, system_type):
+    """Plot schematic of the problem setting."""
+    ax.set_facecolor('#F0F4F8')
+    x = np.linspace(-2.2, 2.2, 100)
     
-    fig, axes = plt.subplots(4, 5, figsize=(18, 12))
+    if system_name == 'Harmonic':
+        y = 0.5 * x**2
+        ax.plot(x, y, 'k-', lw=1.5, alpha=0.7)
+        # Illustrate observable <x^2>
+        # Shade the thermal distribution
+        prob = np.exp(-y)
+        ax.fill_between(x, y, 4, alpha=0.05, color='gray')
+        ax.fill_between(x, 0, prob * 1.5, color=COLORS['Theory'], alpha=0.3)
+        ax.annotate(r'$\langle x^2 \rangle$', xy=(0, 0.5), ha='center', fontsize=9, fontweight='bold')
+        # Highlight optimized parameter k
+        ax.annotate('Optimize $k$', xy=(1.5, 1.125), xytext=(0.5, 2.5),
+                   arrowprops=dict(arrowstyle='->', color='black', lw=1), fontsize=8, ha='center')
+        
+    elif system_name == 'Asym. DW':
+        y = (x**2 - 1)**2 + 0.3 * x
+        ax.plot(x, y, 'k-', lw=1.5, alpha=0.7)
+        # Illustrate mean position shift
+        ax.axvline(-1.1, color=COLORS['Target'], ls='--', alpha=0.6, lw=1)
+        ax.annotate(r'$\langle x \rangle$', xy=(-1.1, 0.5), xytext=(-0.5, 2.5), 
+                   arrowprops=dict(arrowstyle='->', color=COLORS['Target']), fontsize=9, color=COLORS['Target'])
+        # Highlight optimized parameter b (tilt)
+        ax.annotate('Optimize $b$ (tilt)', xy=(0, 1.0), xytext=(1.0, 2.0),
+                   arrowprops=dict(arrowstyle='->', color='black', lw=1), fontsize=8, ha='center')
+
+    elif system_name == 'FPT':
+        y = (x**2 - 1)**2
+        ax.plot(x, y, 'k-', lw=1.5, alpha=0.7)
+        # Illustrate barrier crossing
+        ax.scatter([-1], [0], color=COLORS['Target'], s=30, zorder=5)
+        ax.annotate('Start', xy=(-1, 0.1), xytext=(-1.5, 1.5), arrowprops=dict(arrowstyle='->', color='gray'), fontsize=8)
+        ax.axvline(0, color=COLORS['Girsanov'], ls='--', lw=1.5)
+        ax.text(0.1, 2.5, 'Threshold', color=COLORS['Girsanov'], fontsize=8)
+        # Highlight optimized parameter (barrier height)
+        ax.annotate('Optimize Barrier', xy=(0, 1.0), xytext=(0, 3.0),
+                   arrowprops=dict(arrowstyle='->', color='black', lw=1), fontsize=8, ha='center')
+        
+    elif system_name == 'Trans. Prob.':
+        y = (x**2 - 1)**2
+        ax.plot(x, y, 'k-', lw=1.5, alpha=0.7)
+        # Illustrate transition to right well
+        ax.scatter([-1], [0], color='gray', s=30, alpha=0.5)
+        ax.annotate(r'$P(x_T \in B)$', xy=(1, 0), xytext=(1, 2), 
+                   arrowprops=dict(arrowstyle='->', color=COLORS['Target']), ha='center', fontsize=9, color=COLORS['Target'])
+        ax.fill_between(x, 0, 4, where=(x>0), color=COLORS['Target'], alpha=0.1)
+        # Highlight optimized parameter (barrier height)
+        ax.annotate('Optimize Barrier', xy=(0, 1.0), xytext=(-1.0, 3.0),
+                   arrowprops=dict(arrowstyle='->', color='black', lw=1), fontsize=8, ha='center')
+
+    elif system_name == 'Opt. Control':
+        y = (x**2 - 1)**2
+        ax.plot(x, y, 'k--', lw=1, alpha=0.3)
+        # Illustrate controlled path
+        t = np.linspace(0, 1, 20)
+        path_x = -1 + 2 * t  # Simple path left to right
+        path_y = (path_x**2 - 1)**2 + 0.5 * np.exp(-(path_x)**2) # Lifted path
+        ax.plot(path_x, path_y, '-', color=COLORS['BPTT'], lw=2)
+        ax.arrow(0, 1.0, 0.2, 0, head_width=0.1, color=COLORS['BPTT'])
+        ax.annotate(r'Policy $\pi_\theta(x,t)$', xy=(0, 1.0), xytext=(0, 2.8), 
+                   arrowprops=dict(arrowstyle='->', color=COLORS['BPTT']), color=COLORS['BPTT'], ha='center', fontsize=9)
+        # Highlight optimized policy
+        ax.text(0, 3.2, 'Optimize Policy', fontsize=8, ha='center', fontweight='bold', color=COLORS['BPTT'])
+
+    ax.set_ylim(-1, 3.5)
+    ax.set_yticks([])
+    ax.set_xticks([])
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+
+
+def plot_comprehensive_comparison(results_list, save_path):
+    """Create a 5×5 grid: Setting (row 0) + methods (rows 1-4) × systems (columns)."""
+    
+    fig, axes = plt.subplots(5, 5, figsize=(18, 15))
     fig.patch.set_facecolor('#FAFBFC')
     
     method_names = ['BPTT', 'REINFORCE', 'Implicit', 'Girsanov']
@@ -894,7 +972,22 @@ def plot_comprehensive_comparison(results_list, save_path):
         is_equilibrium = col < 2
         is_control = col == 4
         
-        for row, method in enumerate(method_names):
+        # Row 0: Problem Setting Schematic
+        plot_system_schematic(axes[0, col], sys_name, sys_type)
+        
+        # Title (top row only)
+        color = '#2E3440' if is_equilibrium else '#BF616A'
+        axes[0, col].set_title(f'{sys_name}\n({sys_type})', fontweight='bold', fontsize=12,
+                    color=color, pad=10)
+        
+        # Row label for schematic (left column only)
+        if col == 0:
+            axes[0, col].annotate("Setting", xy=(-0.25, 0.5), xycoords='axes fraction',
+                       rotation=90, va='center', ha='center', fontsize=12,
+                       fontweight='bold', color='#5E81AC')
+
+        for row_idx, method in enumerate(method_names):
+            row = row_idx + 1  # Shift down by 1
             ax = axes[row, col]
             
             method_data = res[method]
@@ -928,7 +1021,7 @@ def plot_comprehensive_comparison(results_list, save_path):
                 ax.set_ylim(-0.05, 1.1)
                 ax.axhline(1.0, color=COLORS['Target'], ls='--', lw=1.5, alpha=0.6)
                 ax.set_ylabel('Success Rate' if col == 0 else '')
-                ax.set_xlabel('Epoch' if row == 3 else '')
+                ax.set_xlabel('Epoch' if row == 4 else '')
             else:
                 # Gradient with error bars
                 grads_mean = np.array(method_data['grads_mean'])
@@ -954,7 +1047,7 @@ def plot_comprehensive_comparison(results_list, save_path):
                 
                 ax.axhline(0, color='gray', ls=':', lw=0.8, alpha=0.5)
                 ax.set_ylabel(f'∇_{param_name}' if col == 0 else '')
-                ax.set_xlabel(param_name if row == 3 else '')
+                ax.set_xlabel(param_name if row == 4 else '')
             
             # Inset: Loss curve - small, consistent position in lower-right
             if 'loss_history' in method_data and len(method_data['loss_history']) > 0:
@@ -986,12 +1079,6 @@ def plot_comprehensive_comparison(results_list, save_path):
                 ax_ins.annotate(f'{final_loss:.1e}', xy=(0.95, 0.92), 
                                xycoords='axes fraction', ha='right', va='top',
                                fontsize=6, color=COLORS[method] if is_valid else COLORS['Invalid'])
-            
-            # Column header (only top row)
-            if row == 0:
-                color = '#2E3440' if is_equilibrium else '#BF616A'
-                ax.set_title(f'{sys_name}\n({sys_type})', fontweight='bold', fontsize=11,
-                            color=color, pad=8)
             
             # Row label (only left column)
             if col == 0:
@@ -1070,6 +1157,117 @@ def print_summary_table(results_list):
     print(f"{'Memory Scaling':<25} | {'O(T)':<12} | {'O(1)':<12} | {'O(1)':<12} | {'O(1)':<12}")
     print(f"{'Needs Diff. Solver':<25} | {'Yes':<12} | {'No':<12} | {'No':<12} | {'No':<12}")
     print("=" * 80)
+
+
+def plot_individual_columns(results_list, save_dir):
+    """Create separate figures for each system column."""
+    
+    method_names = ['BPTT', 'REINFORCE', 'Implicit', 'Girsanov']
+    system_names = ['Harmonic', 'Asym. DW', 'FPT', 'Trans. Prob.', 'Opt. Control']
+    system_types = ['EQ', 'EQ', 'NON-EQ', 'NON-EQ', 'NON-EQ']
+    file_slugs = ['harmonic', 'asym_dw', 'fpt', 'trans_prob', 'opt_control']
+    
+    for col, (res, sys_name, sys_type, slug) in enumerate(zip(results_list, system_names, system_types, file_slugs)):
+        fig, axes = plt.subplots(5, 1, figsize=(4, 12))
+        fig.patch.set_facecolor('#FAFBFC')
+        
+        is_equilibrium = col < 2
+        is_control = col == 4
+        
+        # Row 0: Schematic
+        plot_system_schematic(axes[0], sys_name, sys_type)
+        color = '#2E3440' if is_equilibrium else '#BF616A'
+        axes[0].set_title(f'{sys_name}\n({sys_type})', fontweight='bold', fontsize=11, color=color, pad=8)
+        
+        for row_idx, method in enumerate(method_names):
+            row = row_idx + 1
+            ax = axes[row]
+            method_data = res[method]
+            is_valid = method_data.get('valid', True)
+            
+            # Background
+            if not is_valid:
+                ax.set_facecolor('#FFF8F8')
+                for i in range(-100, 200, 12):
+                    ax.axline((0, i/100), slope=0.5, color='#FFE0E0', lw=0.8, alpha=0.4, clip_on=True)
+            else:
+                ax.set_facecolor('#FFFFFF')
+                
+            param_vals = res['param_values']
+            param_name = res.get('param_name', '')
+            
+            # Main plot
+            if is_control:
+                success = method_data.get('success', method_data['grads_mean'])
+                if is_valid:
+                    ax.plot(param_vals, success, '-', color=COLORS[method], lw=LW)
+                    ax.fill_between(param_vals, 0, success, color=COLORS[method], alpha=0.2)
+                    ax.scatter([param_vals[-1]], [success[-1]], color=COLORS[method], s=60, zorder=5, edgecolor='white', linewidth=1.5)
+                else:
+                    ax.plot(param_vals, success, '--', color=COLORS['Invalid'], lw=LW, alpha=0.5)
+                
+                ax.set_ylim(-0.05, 1.1)
+                ax.axhline(1.0, color=COLORS['Target'], ls='--', lw=1.5, alpha=0.6)
+                ax.set_ylabel('Success Rate')
+                ax.set_xlabel('Epoch' if row == 4 else '')
+            else:
+                grads_mean = np.array(method_data['grads_mean'])
+                grads_std = np.array(method_data['grads_std'])
+                
+                if is_valid and not np.all(np.isnan(grads_mean)):
+                    ax.errorbar(param_vals, grads_mean, yerr=grads_std, fmt='o-', color=COLORS[method], lw=LW, ms=MS,
+                               capsize=3, capthick=1.5, elinewidth=1.5, markeredgecolor='white', markeredgewidth=1)
+                    ax.fill_between(param_vals, grads_mean - grads_std, grads_mean + grads_std, color=COLORS[method], alpha=0.15)
+                elif not np.all(np.isnan(grads_mean)):
+                    ax.errorbar(param_vals, grads_mean, yerr=grads_std, fmt='x--', color=COLORS['Invalid'], lw=LW, ms=MS,
+                               capsize=3, capthick=1.5, elinewidth=1.5, alpha=0.5)
+                
+                if 'theory' in res:
+                    ax.plot(param_vals, res['theory'], '-', color=COLORS['Theory'], lw=2.5, alpha=0.6, label='Theory', zorder=0)
+                
+                ax.axhline(0, color='gray', ls=':', lw=0.8, alpha=0.5)
+                ax.set_ylabel(f'∇_{param_name}')
+                ax.set_xlabel(param_name if row == 4 else '')
+
+            # Inset: Loss curve
+            if 'loss_history' in method_data and len(method_data['loss_history']) > 0:
+                ax_ins = ax.inset_axes([0.62, 0.08, 0.35, 0.32])
+                ax_ins.set_facecolor('white')
+                ax_ins.patch.set_alpha(0.9)
+                loss_hist = method_data['loss_history']
+                epochs = range(len(loss_hist))
+                
+                if is_valid:
+                    ax_ins.plot(epochs, loss_hist, '-', color=COLORS[method], lw=1.2)
+                    ax_ins.scatter([len(loss_hist)-1], [loss_hist[-1]], color=COLORS[method], s=20, zorder=5)
+                else:
+                    ax_ins.plot(epochs, loss_hist, '--', color=COLORS['Invalid'], lw=1.2, alpha=0.6)
+                
+                ax_ins.tick_params(labelsize=6, length=2, pad=1)
+                ax_ins.set_title('Loss', fontsize=7, pad=1)
+                for spine in ax_ins.spines.values():
+                    spine.set_edgecolor('#CCCCCC')
+                    spine.set_linewidth(0.8)
+                
+                final_loss = loss_hist[-1]
+                ax_ins.annotate(f'{final_loss:.1e}', xy=(0.95, 0.92), xycoords='axes fraction', ha='right', va='top',
+                               fontsize=6, color=COLORS[method] if is_valid else COLORS['Invalid'])
+
+            # Method label (on every row for individual plots)
+            ax.annotate(method, xy=(-0.25, 0.5), xycoords='axes fraction',
+                       rotation=90, va='center', ha='center', fontsize=10,
+                       fontweight='bold', color=COLORS[method])
+
+            # Invalid marker
+            if not is_valid:
+                ax.text(0.5, 0.5, '✗', transform=ax.transAxes, fontsize=40, ha='center', va='center',
+                       color=COLORS['Invalid'], alpha=0.12, fontweight='bold')
+
+        plt.tight_layout()
+        save_path = os.path.join(save_dir, f"demo_col_{slug}.png")
+        plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='#FAFBFC')
+        print(f"[+] Saved column figure to {save_path}")
+        plt.close(fig)
     
     
 # =============================================================================
@@ -1106,6 +1304,9 @@ if __name__ == "__main__":
     # Plot and save
     save_path = os.path.join(assets_dir, "demo_gradient_estimators.png")
     plot_comprehensive_comparison(results, save_path)
+    
+    # Save individual columns
+    plot_individual_columns(results, assets_dir)
     
     # Print summary
     print_summary_table(results)
