@@ -44,7 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from uni_diffsim import (
     OverdampedLangevin, BAOAB,
     DoubleWell, AsymmetricDoubleWell, Harmonic,
-    ReinforceEstimator, ImplicitDiffEstimator,
+    ReinforceEstimator, ImplicitDiffEstimator, GirsanovEstimator,
 )
 from uni_diffsim.plotting import apply_style, COLORS as BASE_COLORS, LW, MS
 
@@ -56,6 +56,7 @@ COLORS = {
     'BPTT': BASE_COLORS['bptt'],
     'REINFORCE': BASE_COLORS['reinforce'],
     'Implicit': BASE_COLORS['implicit'],
+    'Girsanov': '#D08770',  # Rusty orange
     'Invalid': BASE_COLORS['invalid'],
     'Theory': BASE_COLORS['theory'],
     'Target': BASE_COLORS['target'],
@@ -66,6 +67,7 @@ MARKERS = {
     'BPTT': 'o',
     'REINFORCE': '^',
     'Implicit': 's',
+    'Girsanov': 'D',
 }
 N_TRIALS = 5  # Number of trials for uncertainty estimation
 
@@ -114,11 +116,12 @@ def run_harmonic_equilibrium():
         'BPTT': {'grads_mean': [], 'grads_std': [], 'valid': True, 'loss_history': []},
         'REINFORCE': {'grads_mean': [], 'grads_std': [], 'valid': True, 'loss_history': []},
         'Implicit': {'grads_mean': [], 'grads_std': [], 'valid': True, 'loss_history': []},
+        'Girsanov': {'grads_mean': [], 'grads_std': [], 'valid': True, 'loss_history': []},
     }
     
     # Collect gradients with uncertainty across multiple trials
     for k in k_values:
-        bptt_grads, rf_grads, imp_grads = [], [], []
+        bptt_grads, rf_grads, imp_grads, gir_grads = [], [], [], []
         
         for trial in range(N_TRIALS):
             torch.manual_seed(trial * 100 + int(k * 10))
@@ -147,6 +150,16 @@ def run_harmonic_equilibrium():
             estimator_imp = ImplicitDiffEstimator(potential_imp, beta=beta, mode='equilibrium')
             grads_imp = estimator_imp.estimate_gradient(samples_det, observable=observable)
             imp_grads.append(grads_imp['k'].item())
+
+            # Girsanov
+            potential_gir = Harmonic(k=k)
+            estimator_gir = GirsanovEstimator(potential_gir, sigma=np.sqrt(2*kT), beta=beta)
+            # Girsanov needs trajectories (n_traj, n_steps, dim)
+            traj_gir = traj.detach().transpose(0, 1)  # (n_walkers, n_steps, 1)
+            # Observable takes trajectory, returns (n_walkers,)
+            obs_gir = lambda t: (t[:, burn_in//5:]**2).mean(dim=1).sum(dim=-1)
+            grads_gir = estimator_gir.estimate_gradient(traj_gir, observable=obs_gir, dt=dt*5) # store_every=5
+            gir_grads.append(grads_gir['k'].item())
         
         results['BPTT']['grads_mean'].append(np.mean(bptt_grads))
         results['BPTT']['grads_std'].append(np.std(bptt_grads))
@@ -154,6 +167,8 @@ def run_harmonic_equilibrium():
         results['REINFORCE']['grads_std'].append(np.std(rf_grads))
         results['Implicit']['grads_mean'].append(np.mean(imp_grads))
         results['Implicit']['grads_std'].append(np.std(imp_grads))
+        results['Girsanov']['grads_mean'].append(np.mean(gir_grads))
+        results['Girsanov']['grads_std'].append(np.std(gir_grads))
     
     # Single optimization run for loss history
     # Use different seeds and learning rates for each method to show distinct paths
@@ -162,9 +177,10 @@ def run_harmonic_equilibrium():
         'BPTT': {'k_init': 2.0, 'lr': 0.15, 'seed_offset': 0},
         'REINFORCE': {'k_init': 2.2, 'lr': 0.12, 'seed_offset': 1000},
         'Implicit': {'k_init': 1.8, 'lr': 0.10, 'seed_offset': 2000},
+        'Girsanov': {'k_init': 2.1, 'lr': 0.08, 'seed_offset': 3000},
     }
     
-    for method in ['BPTT', 'REINFORCE', 'Implicit']:
+    for method in ['BPTT', 'REINFORCE', 'Implicit', 'Girsanov']:
         cfg = method_configs[method]
         k_param = cfg['k_init']
         lr = cfg['lr']
@@ -194,17 +210,22 @@ def run_harmonic_equilibrium():
                 var = (samples**2).mean().item()
                 loss = (var - target_var)**2
                 
+                potential_for_grad = Harmonic(k=k_param)
                 if method == 'REINFORCE':
-                    potential_rf = Harmonic(k=k_param)
-                    estimator = ReinforceEstimator(potential_rf, beta=beta)
+                    estimator = ReinforceEstimator(potential_for_grad, beta=beta)
                     observable = lambda x: (x**2).sum(dim=-1)
                     grads = estimator.estimate_gradient(samples, observable=observable)
                     grad = 2 * (var - target_var) * grads['k'].item()
-                else:  # Implicit
-                    potential_imp = Harmonic(k=k_param)
-                    estimator = ImplicitDiffEstimator(potential_imp, beta=beta, mode='equilibrium')
+                elif method == 'Implicit':
+                    estimator = ImplicitDiffEstimator(potential_for_grad, beta=beta, mode='equilibrium')
                     observable = lambda x: (x**2).sum(dim=-1)
                     grads = estimator.estimate_gradient(samples, observable=observable)
+                    grad = 2 * (var - target_var) * grads['k'].item()
+                else: # Girsanov
+                    estimator = GirsanovEstimator(potential_for_grad, sigma=np.sqrt(2*kT), beta=beta)
+                    traj_gir = traj.transpose(0, 1)
+                    obs_gir = lambda t: (t[:, burn_in//5:]**2).mean(dim=1).sum(dim=-1)
+                    grads = estimator.estimate_gradient(traj_gir, observable=obs_gir, dt=dt*5)
                     grad = 2 * (var - target_var) * grads['k'].item()
             
             results[method]['loss_history'].append(loss if isinstance(loss, float) else loss.item())
@@ -353,10 +374,11 @@ def run_asymmetric_equilibrium():
         'BPTT': {'grads_mean': [], 'grads_std': [], 'valid': True, 'loss_history': []},
         'REINFORCE': {'grads_mean': [], 'grads_std': [], 'valid': True, 'loss_history': []},
         'Implicit': {'grads_mean': [], 'grads_std': [], 'valid': True, 'loss_history': []},
+        'Girsanov': {'grads_mean': [], 'grads_std': [], 'valid': True, 'loss_history': []},
     }
     
     for b in b_values:
-        bptt_grads, rf_grads, imp_grads = [], [], []
+        bptt_grads, rf_grads, imp_grads, gir_grads = [], [], [], []
         
         for trial in range(N_TRIALS):
             torch.manual_seed(trial * 100 + int((b + 1) * 10))
@@ -382,6 +404,14 @@ def run_asymmetric_equilibrium():
             estimator_imp = ImplicitDiffEstimator(potential_imp, beta=beta, mode='equilibrium')
             grads_imp = estimator_imp.estimate_gradient(samples_det, observable=observable)
             imp_grads.append(grads_imp['asymmetry'].item())
+
+            # Girsanov
+            potential_gir = AsymmetricDoubleWell(barrier_height=1.0, asymmetry=b)
+            estimator_gir = GirsanovEstimator(potential_gir, sigma=np.sqrt(2*kT), beta=beta)
+            traj_gir = traj.detach().transpose(0, 1)
+            obs_gir = lambda t: t[:, burn_in//5:].mean(dim=1).squeeze(-1)
+            grads_gir = estimator_gir.estimate_gradient(traj_gir, observable=obs_gir, dt=dt*5)
+            gir_grads.append(grads_gir['asymmetry'].item())
         
         results['BPTT']['grads_mean'].append(np.mean(bptt_grads))
         results['BPTT']['grads_std'].append(np.std(bptt_grads))
@@ -389,6 +419,8 @@ def run_asymmetric_equilibrium():
         results['REINFORCE']['grads_std'].append(np.std(rf_grads))
         results['Implicit']['grads_mean'].append(np.mean(imp_grads))
         results['Implicit']['grads_std'].append(np.std(imp_grads))
+        results['Girsanov']['grads_mean'].append(np.mean(gir_grads))
+        results['Girsanov']['grads_std'].append(np.std(gir_grads))
     
     # Loss history - different configs for each method
     target_mean = 0.0
@@ -468,10 +500,11 @@ def run_fpt_nonequilibrium():
         'BPTT': {'grads_mean': [], 'grads_std': [], 'valid': True, 'loss_history': []},
         'REINFORCE': {'grads_mean': [], 'grads_std': [], 'valid': False, 'loss_history': []},
         'Implicit': {'grads_mean': [], 'grads_std': [], 'valid': False, 'loss_history': []},
+        'Girsanov': {'grads_mean': [], 'grads_std': [], 'valid': True, 'loss_history': []},
     }
     
     for b in barrier_values:
-        bptt_grads, rf_grads = [], []
+        bptt_grads, rf_grads, gir_grads = [], [], []
         
         for trial in range(N_TRIALS):
             torch.manual_seed(trial * 100 + int(b * 10))
@@ -495,25 +528,37 @@ def run_fpt_nonequilibrium():
                 rf_grads.append(grads['barrier_height'].item() * n_steps / 10)
             except Exception:
                 rf_grads.append(np.nan)
-        
+
+            # Girsanov - VALID for non-equilibrium!
+            potential_gir = DoubleWell(barrier_height=b)
+            estimator_gir = GirsanovEstimator(potential_gir, sigma=np.sqrt(2*kT), beta=beta)
+            traj_gir = traj.detach().transpose(0, 1) # (n_walkers, n_steps, 1)
+            # FPT depends on full trajectory
+            obs_gir = lambda t: torch.stack([soft_fpt(t[i].unsqueeze(1), threshold=0.0, sigma=0.1, dt=dt) for i in range(t.shape[0])])
+            grads_gir = estimator_gir.estimate_gradient(traj_gir, observable=obs_gir, dt=dt)
+            gir_grads.append(grads_gir['barrier_height'].item())
+
         results['BPTT']['grads_mean'].append(np.mean(bptt_grads))
         results['BPTT']['grads_std'].append(np.std(bptt_grads))
         results['REINFORCE']['grads_mean'].append(np.nanmean(rf_grads))
         results['REINFORCE']['grads_std'].append(np.nanstd(rf_grads))
         results['Implicit']['grads_mean'].append(np.nan)
         results['Implicit']['grads_std'].append(np.nan)
+        results['Girsanov']['grads_mean'].append(np.mean(gir_grads))
+        results['Girsanov']['grads_std'].append(np.std(gir_grads))
     
     # Loss history - BPTT works, others don't optimize properly
     target_fpt = 1.0
     method_configs = {
-        'BPTT': {'init': 2.0, 'lr': 0.12, 'seed_offset': 0},
-        'REINFORCE': {'init': 1.8, 'seed_offset': 1000},  # No lr - random walk
-        'Implicit': {'init': 2.2, 'seed_offset': 2000},   # No lr - random walk
+        'BPTT': {'init': 2.0, 'lr': 0.1, 'seed_offset': 0},
+        'REINFORCE': {'init': 2.0, 'lr': 0.1, 'seed_offset': 0},  # No lr - random walk
+        'Implicit': {'init': 2.0, 'lr': 0.1, 'seed_offset': 0},   # No lr - random walk
+        'Girsanov': {'init': 2.0, 'lr': 0.1, 'seed_offset': 0}, # Should work!
     }
     
     np.random.seed(42)  # For reproducible random walks
     
-    for method in ['BPTT', 'REINFORCE', 'Implicit']:
+    for method in ['BPTT', 'REINFORCE', 'Implicit', 'Girsanov']:
         cfg = method_configs[method]
         barrier_param = cfg['init']
         
@@ -548,12 +593,22 @@ def run_fpt_nonequilibrium():
                 fpt_measured = first_cross.mean().item()
                 loss = (fpt_measured - target_fpt)**2
                 
-                # Invalid methods: different random walks to show they don't converge
-                if method == 'REINFORCE':
-                    barrier_param += 0.03 * np.random.randn()
-                else:  # Implicit
-                    barrier_param += 0.025 * np.random.randn()
-                barrier_param = max(0.3, min(3.0, barrier_param))
+                if method == 'Girsanov':
+                     potential_gir = DoubleWell(barrier_height=barrier_param)
+                     estimator = GirsanovEstimator(potential_gir, sigma=np.sqrt(2*kT), beta=beta)
+                     traj_gir = traj.transpose(0, 1)
+                     # Same vectorized FPT calculation
+                     obs_gir = lambda t: torch.stack([soft_fpt(t[i].unsqueeze(1), threshold=0.0, sigma=0.1, dt=dt) for i in range(t.shape[0])])
+                     grads = estimator.estimate_gradient(traj_gir, observable=obs_gir, dt=dt)
+                     grad = 2 * (fpt_measured - target_fpt) * grads['barrier_height'].item()
+                     barrier_param = max(0.3, min(3.0, barrier_param - cfg['lr'] * np.clip(grad, -1, 1)))
+                else:
+                    # Invalid methods: different random walks to show they don't converge
+                    if method == 'REINFORCE':
+                        barrier_param += 0.03 * np.random.randn()
+                    else:  # Implicit
+                        barrier_param += 0.025 * np.random.randn()
+                    barrier_param = max(0.3, min(3.0, barrier_param))
             
             results[method]['loss_history'].append(loss if isinstance(loss, float) else loss.item())
     
@@ -584,10 +639,11 @@ def run_transition_prob_nonequilibrium():
         'BPTT': {'grads_mean': [], 'grads_std': [], 'valid': True, 'loss_history': []},
         'REINFORCE': {'grads_mean': [], 'grads_std': [], 'valid': False, 'loss_history': []},
         'Implicit': {'grads_mean': [], 'grads_std': [], 'valid': False, 'loss_history': []},
+        'Girsanov': {'grads_mean': [], 'grads_std': [], 'valid': True, 'loss_history': []},
     }
     
     for b in barrier_values:
-        bptt_grads, rf_grads = [], []
+        bptt_grads, rf_grads, gir_grads = [], [], []
         
         for trial in range(N_TRIALS):
             torch.manual_seed(trial * 100 + int(b * 10))
@@ -612,25 +668,37 @@ def run_transition_prob_nonequilibrium():
                 rf_grads.append(grads['barrier_height'].item())
             except Exception:
                 rf_grads.append(np.nan)
-        
+
+            # Girsanov - VALID for non-equilibrium!
+            potential_gir = DoubleWell(barrier_height=b)
+            estimator_gir = GirsanovEstimator(potential_gir, sigma=np.sqrt(2*kT), beta=beta)
+            traj_gir = traj.detach().transpose(0, 1) # (n_walkers, n_steps, 1)
+            # Observable: soft indicator of final position
+            obs_gir = lambda t: soft_indicator(t[:, -1, 0], 0.0, sigma_soft)
+            grads_gir = estimator_gir.estimate_gradient(traj_gir, observable=obs_gir, dt=dt)
+            gir_grads.append(grads_gir['barrier_height'].item())
+
         results['BPTT']['grads_mean'].append(np.mean(bptt_grads))
         results['BPTT']['grads_std'].append(np.std(bptt_grads))
         results['REINFORCE']['grads_mean'].append(np.nanmean(rf_grads))
         results['REINFORCE']['grads_std'].append(np.nanstd(rf_grads))
         results['Implicit']['grads_mean'].append(np.nan)
         results['Implicit']['grads_std'].append(np.nan)
+        results['Girsanov']['grads_mean'].append(np.mean(gir_grads))
+        results['Girsanov']['grads_std'].append(np.std(gir_grads))
     
-    # Loss history - BPTT works, others don't optimize properly
+    # Loss history - different configs for each method
     target_p = 0.5
     method_configs = {
-        'BPTT': {'init': 1.5, 'lr': 0.12, 'seed_offset': 0},
-        'REINFORCE': {'init': 1.3, 'seed_offset': 1000},  # Random walk
-        'Implicit': {'init': 1.7, 'seed_offset': 2000},   # Random walk
+        'BPTT': {'init': 1.5, 'lr': 0.1, 'seed_offset': 0},
+        'REINFORCE': {'init': 1.5, 'lr': 0.1, 'seed_offset': 0},  # Random walk
+        'Implicit': {'init': 1.5, 'lr': 0.1, 'seed_offset': 0},   # Random walk
+        'Girsanov': {'init': 1.5, 'lr': 0.1, 'seed_offset': 0}, # Should work!
     }
     
-    np.random.seed(123)  # Different seed for this experiment
+    np.random.seed(42)  # For reproducible random walks
     
-    for method in ['BPTT', 'REINFORCE', 'Implicit']:
+    for method in ['BPTT', 'REINFORCE', 'Implicit', 'Girsanov']:
         cfg = method_configs[method]
         barrier_param = cfg['init']
         
@@ -662,12 +730,21 @@ def run_transition_prob_nonequilibrium():
                 p_trans = (x_final > 0).float().mean().item()
                 loss = (p_trans - target_p)**2
                 
-                # Different random walks for each method
-                if method == 'REINFORCE':
-                    barrier_param += 0.025 * np.random.randn()
-                else:  # Implicit
-                    barrier_param += 0.03 * np.random.randn()
-                barrier_param = max(0.3, min(3.0, barrier_param))
+                if method == 'Girsanov':
+                     potential_gir = DoubleWell(barrier_height=barrier_param)
+                     estimator = GirsanovEstimator(potential_gir, sigma=np.sqrt(2*kT), beta=beta)
+                     traj_gir = traj.transpose(0, 1)
+                     obs_gir = lambda t: soft_indicator(t[:, -1, 0], 0.0, sigma_soft)
+                     grads = estimator.estimate_gradient(traj_gir, observable=obs_gir, dt=dt)
+                     grad = 2 * (p_trans - target_p) * grads['barrier_height'].item()
+                     barrier_param = max(0.3, min(3.0, barrier_param - cfg['lr'] * np.clip(grad, -1, 1)))
+                else:
+                    # Different random walks for each method
+                    if method == 'REINFORCE':
+                        barrier_param += 0.025 * np.random.randn()
+                    else:  # Implicit
+                        barrier_param += 0.03 * np.random.randn()
+                    barrier_param = max(0.3, min(3.0, barrier_param))
             
             results[method]['loss_history'].append(loss if isinstance(loss, float) else loss.item())
     
@@ -725,6 +802,7 @@ def run_optimal_control():
         'BPTT': {'grads_mean': [], 'grads_std': [], 'valid': True, 'loss_history': [], 'success': []},
         'REINFORCE': {'grads_mean': [], 'grads_std': [], 'valid': False, 'loss_history': [], 'success': []},
         'Implicit': {'grads_mean': [], 'grads_std': [], 'valid': False, 'loss_history': [], 'success': []},
+        'Girsanov': {'grads_mean': [], 'grads_std': [], 'valid': False, 'loss_history': [], 'success': []},
     }
     
     # Use library components instead of manual implementation
@@ -773,9 +851,9 @@ def run_optimal_control():
         results['BPTT']['grads_mean'].append(success_rate)  # Use success as "gradient proxy"
         results['BPTT']['grads_std'].append(0.0)
     
-    # REINFORCE/Implicit: Uncontrolled baseline (only potential force, no control)
+    # REINFORCE/Implicit/Girsanov: Uncontrolled baseline (only potential force, no control)
     # Shows what happens without learned control - particles stay trapped in left well
-    for method in ['REINFORCE', 'Implicit']:
+    for method in ['REINFORCE', 'Implicit', 'Girsanov']:
         for epoch in range(n_epochs):
             torch.manual_seed(epoch)
             x = torch.full((n_walkers, 1), x_start)
@@ -803,12 +881,12 @@ def run_optimal_control():
 # =============================================================================
 
 def plot_comprehensive_comparison(results_list, save_path):
-    """Create a 3×5 grid: methods (rows) × systems (columns)."""
+    """Create a 4×5 grid: methods (rows) × systems (columns)."""
     
-    fig, axes = plt.subplots(3, 5, figsize=(18, 10))
+    fig, axes = plt.subplots(4, 5, figsize=(18, 12))
     fig.patch.set_facecolor('#FAFBFC')
     
-    method_names = ['BPTT', 'REINFORCE', 'Implicit']
+    method_names = ['BPTT', 'REINFORCE', 'Implicit', 'Girsanov']
     system_names = ['Harmonic', 'Asym. DW', 'FPT', 'Trans. Prob.', 'Opt. Control']
     system_types = ['EQ', 'EQ', 'NON-EQ', 'NON-EQ', 'NON-EQ']
     
@@ -850,7 +928,7 @@ def plot_comprehensive_comparison(results_list, save_path):
                 ax.set_ylim(-0.05, 1.1)
                 ax.axhline(1.0, color=COLORS['Target'], ls='--', lw=1.5, alpha=0.6)
                 ax.set_ylabel('Success Rate' if col == 0 else '')
-                ax.set_xlabel('Epoch' if row == 2 else '')
+                ax.set_xlabel('Epoch' if row == 3 else '')
             else:
                 # Gradient with error bars
                 grads_mean = np.array(method_data['grads_mean'])
@@ -876,7 +954,7 @@ def plot_comprehensive_comparison(results_list, save_path):
                 
                 ax.axhline(0, color='gray', ls=':', lw=0.8, alpha=0.5)
                 ax.set_ylabel(f'∇_{param_name}' if col == 0 else '')
-                ax.set_xlabel(param_name if row == 2 else '')
+                ax.set_xlabel(param_name if row == 3 else '')
             
             # Inset: Loss curve - small, consistent position in lower-right
             if 'loss_history' in method_data and len(method_data['loss_history']) > 0:
@@ -948,7 +1026,8 @@ def plot_comprehensive_comparison(results_list, save_path):
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "BPTT:      O(T) mem, universal\n"
         "REINFORCE: O(1) mem, eq. only\n"
-        "Implicit:  O(1) mem, eq.+opt."
+        "Implicit:  O(1) mem, eq.+opt.\n"
+        "Girsanov:  O(1) mem, path-space"
     )
     fig.text(0.99, 0.01, summary_text, fontsize=9, va='bottom', ha='right',
              family='monospace',
@@ -976,22 +1055,23 @@ def print_summary_table(results_list):
     print("\n" + "=" * 80)
     print("Summary: Gradient Method Applicability")
     print("=" * 80)
-    print(f"{'System':<25} | {'BPTT':<12} | {'REINFORCE':<12} | {'Implicit':<12}")
+    print(f"{'System':<25} | {'BPTT':<12} | {'REINFORCE':<12} | {'Implicit':<12} | {'Girsanov':<12}")
     print("-" * 80)
     
     for sys_name, res in zip(system_names, results_list):
         bptt = '✓' if res['BPTT'].get('valid', True) else '✗'
         rf = '✓' if res['REINFORCE'].get('valid', True) else '✗'
         imp = '✓' if res['Implicit'].get('valid', True) else '✗'
+        gir = '✓' if res['Girsanov'].get('valid', True) else '✗'
         
-        print(f"{sys_name:<25} | {bptt:^12} | {rf:^12} | {imp:^12}")
+        print(f"{sys_name:<25} | {bptt:^12} | {rf:^12} | {imp:^12} | {gir:^12}")
     
     print("-" * 80)
-    print(f"{'Memory Scaling':<25} | {'O(T)':<12} | {'O(1)':<12} | {'O(1)':<12}")
-    print(f"{'Needs Diff. Solver':<25} | {'Yes':<12} | {'No':<12} | {'No':<12}")
+    print(f"{'Memory Scaling':<25} | {'O(T)':<12} | {'O(1)':<12} | {'O(1)':<12} | {'O(1)':<12}")
+    print(f"{'Needs Diff. Solver':<25} | {'Yes':<12} | {'No':<12} | {'No':<12} | {'No':<12}")
     print("=" * 80)
-
-
+    
+    
 # =============================================================================
 # Main
 # =============================================================================
@@ -1000,7 +1080,7 @@ if __name__ == "__main__":
     print("=" * 80)
     print("Comprehensive Gradient Methods Comparison")
     print("=" * 80)
-    print(f"Testing: BPTT vs REINFORCE vs Implicit Differentiation")
+    print(f"Testing: BPTT vs REINFORCE vs Implicit Differentiation vs Girsanov")
     print(f"Uncertainty: {N_TRIALS} trials per parameter value")
     print("=" * 80)
     
