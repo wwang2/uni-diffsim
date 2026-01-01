@@ -28,7 +28,7 @@ Disadvantages:
 
 import torch
 import torch.nn as nn
-from torch.func import functional_call, jvp, vmap
+from torch.func import functional_call, jvp, vmap, grad
 from typing import Callable, Tuple, Optional, Union, Dict, List
 import gc
 import math
@@ -172,6 +172,48 @@ class ReinforceEstimator(nn.Module):
 
         return grads
 
+    def _compute_per_sample_grads(self, samples_flat: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Compute per-sample gradients of potential energy w.r.t parameters using torch.func.
+
+        Returns:
+            Dictionary mapping parameter names to gradients of shape (n_samples, *param_shape).
+        """
+        # Get all parameters
+        params = dict(self.potential.named_parameters())
+
+        # We need to compute gradients w.r.t parameters
+        # We define a functional wrapper around potential.energy
+        # (Assuming potential implements energy or forward; potential is nn.Module)
+
+        def energy_fn(params_dict, x):
+            # functional_call replaces module parameters with params_dict
+            # Note: functional_call invokes the module's forward method.
+            # Most Potentials implement forward() calling energy(), but to be safe
+            # we should check if we can call energy directly?
+            # functional_call does not support method dispatch easily.
+            # It patches the module and calls it.
+            # uni_diffsim Potentials implement forward -> energy.
+
+            # If the user provided a custom potential where forward != energy,
+            # this might be an issue. But typically forward is the main entry point.
+            # We assume forward computes energy.
+            # Ensure scalar output for grad (handles 1-element tensors)
+            return functional_call(self.potential, params_dict, (x,)).sum()
+
+        # Compute gradient w.r.t params (arg 0)
+        # We use grad() to get gradients w.r.t dictionary values
+        grad_fn = grad(energy_fn, argnums=0)
+
+        # vmap over samples (arg 1, dim 0)
+        # in_dims=(None, 0) means params are shared, x is batched along dim 0
+        batch_grad_fn = vmap(grad_fn, in_dims=(None, 0))
+
+        # Compute gradients
+        # Note: samples_flat has shape (N, D)
+        grads_dict = batch_grad_fn(params, samples_flat)
+
+        return grads_dict
+
     def estimate_gradient(
         self,
         samples: torch.Tensor,
@@ -217,59 +259,97 @@ class ReinforceEstimator(nn.Module):
             else:
                 raise ValueError(f"Observable must return (n_samples,) tensor, got {O.shape} for {n_samples} samples")
 
-        # Compute ⟨O⟩
-        O_mean = O.mean()
-
-        # Apply baseline for variance reduction
-        if self.baseline is None:
-            # Default: subtract mean (standard REINFORCE)
-            O_centered = O - O_mean
-        elif self.baseline == "optimal":
-            # Optimal baseline requires second pass - compute later
-            O_centered = O - O_mean  # Placeholder
-        elif callable(self.baseline):
-            b = self.baseline(samples_flat)
-            O_centered = O - b
-        elif isinstance(self.baseline, torch.Tensor):
-            O_centered = O - self.baseline
-        else:
-            O_centered = O - O_mean
-
-        # Compute per-sample gradients dU_i/dθ
         grads = {}
 
-        # Compute energy and its gradients
-        U = self.potential.energy(samples_flat)
+        if self.baseline == "optimal":
+            # Optimal baseline implementation
+            # b* = E[O * (dU/dθ)^2] / E[(dU/dθ)^2] (element-wise)
 
-        for name, param in self.potential.named_parameters():
-            if not param.requires_grad:
-                continue
+            # 1. Compute per-sample gradients for all parameters
+            # This uses torch.func for efficiency
+            grads_per_sample = self._compute_per_sample_grads(samples_flat)
 
-            # Compute dU/dθ via autograd
-            # Strategy: Compute ⟨O * dU/dθ⟩ using autograd's chain rule
-            # d/dθ ⟨O * U⟩ = ⟨O * dU/dθ⟩ (when O doesn't depend on θ)
+            # 2. Compute gradients with optimal baseline
+            for name, param in self.potential.named_parameters():
+                if not param.requires_grad or name not in grads_per_sample:
+                    continue
 
-            # Weighted sum: sum(O * U)
-            weighted_U = (O_centered * U).sum()
+                g = grads_per_sample[name] # (n_samples, *param_shape)
 
-            # Gradient of weighted sum
-            grad_weighted = torch.autograd.grad(
-                weighted_U,
-                param,
-                create_graph=True,
-                retain_graph=True,
-                allow_unused=True
-            )[0]
+                # Check shapes
+                if g.shape[0] != n_samples:
+                    # Should not happen with vmap
+                    continue
 
-            # Also compute ⟨dU/dθ⟩ for the baseline correction (if needed explicitly)
-            # Actually, O_centered already handles the baseline implicitly:
-            # sum((O - b) * dU/dθ) = sum(O * dU/dθ) - b * sum(dU/dθ)
-            # This is exactly what we want.
+                # Ensure O broadcasts correctly
+                # O is (n_samples,) -> (n_samples, 1, ..., 1)
+                view_shape = [n_samples] + [1] * (g.ndim - 1)
+                O_view = O.view(view_shape)
 
-            if grad_weighted is not None:
-                # REINFORCE gradient: -β * [⟨(O - b) * dU/dθ⟩]
-                grad_reinforce = -self.beta * (grad_weighted / n_samples)
-                grads[name] = grad_reinforce
+                g_sq = g.square()
+
+                # Compute baseline numerator and denominator (sum over samples)
+                denom = g_sq.sum(dim=0) # (*param_shape)
+                num = (O_view * g_sq).sum(dim=0) # (*param_shape)
+
+                # Avoid division by zero (if gradient is 0, baseline doesn't matter, set to 0)
+                # mask where denom > epsilon
+                mask = denom.abs() > 1e-10
+                b_star = torch.zeros_like(denom)
+                b_star[mask] = num[mask] / denom[mask]
+
+                # Compute gradient estimate: -β * mean((O - b*) * g)
+                # O - b* broadcasts
+                diff = O_view - b_star.unsqueeze(0)
+                grad_est = -self.beta * (diff * g).mean(dim=0)
+
+                grads[name] = grad_est
+
+        else:
+            # Standard baseline (constant or mean) logic
+
+            # Compute ⟨O⟩
+            O_mean = O.mean()
+
+            # Apply baseline for variance reduction
+            if self.baseline is None:
+                # Default: subtract mean (standard REINFORCE)
+                O_centered = O - O_mean
+            elif callable(self.baseline):
+                b = self.baseline(samples_flat)
+                O_centered = O - b
+            elif isinstance(self.baseline, torch.Tensor):
+                O_centered = O - self.baseline
+            else:
+                O_centered = O - O_mean
+
+            # Compute energy
+            U = self.potential.energy(samples_flat)
+
+            for name, param in self.potential.named_parameters():
+                if not param.requires_grad:
+                    continue
+
+                # Compute dU/dθ via autograd
+                # Strategy: Compute ⟨O * dU/dθ⟩ using autograd's chain rule
+                # d/dθ ⟨O * U⟩ = ⟨O * dU/dθ⟩ (when O doesn't depend on θ)
+
+                # Weighted sum: sum(O * U)
+                weighted_U = (O_centered * U).sum()
+
+                # Gradient of weighted sum
+                grad_weighted = torch.autograd.grad(
+                    weighted_U,
+                    param,
+                    create_graph=True,
+                    retain_graph=True,
+                    allow_unused=True
+                )[0]
+
+                if grad_weighted is not None:
+                    # REINFORCE gradient: -β * [⟨(O - b) * dU/dθ⟩]
+                    grad_reinforce = -self.beta * (grad_weighted / n_samples)
+                    grads[name] = grad_reinforce
 
         return grads
 
