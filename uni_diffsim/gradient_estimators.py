@@ -1054,6 +1054,62 @@ class ContinuousAdjointNoseHoover(nn.Module):
         self.mass = nn.Parameter(torch.tensor(mass))
         self.Q = nn.Parameter(torch.tensor(Q))
 
+    def reverse_step(self, x: torch.Tensor, v: torch.Tensor, alpha: torch.Tensor,
+                     force_fn: Callable[[torch.Tensor], torch.Tensor], dt: float
+                     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Single reverse NoseHoover step (Kleinerman 08 scheme).
+
+        Used for O(1) memory adjoint by reconstructing trajectory backward in time.
+        Exact reversal of the forward step.
+        """
+        ndof = x.shape[-1]
+
+        # 3. Undo second thermostat half-step (Step 9, 8, 7)
+        # alpha' = alpha3 + ... -> alpha3 = alpha' - ...
+        # v4 = v3 * exp(...) -> v3 = v4 * exp(+...)
+        # alpha3 = alpha2 + ... -> alpha2 = alpha3 - ...
+
+        # Note: In forward step, we update alpha, then v, then alpha.
+        # Reverse: alpha, then v, then alpha.
+
+        # From end state (x_new, v_new, alpha_new):
+
+        # Step 9 reverse
+        v2_sq = (v**2).sum(dim=-1)
+        alpha = alpha - (dt / 4) * (v2_sq - ndof * self.kT) / self.Q
+
+        # Step 8 reverse
+        v = v * torch.exp(alpha.unsqueeze(-1) * dt / 2) # Note positive exponent
+
+        # Step 7 reverse
+        v2_sq = (v**2).sum(dim=-1)
+        alpha = alpha - (dt / 4) * (v2_sq - ndof * self.kT) / self.Q
+
+        # 2. Undo Velocity-Verlet (Step 6, 5, 4)
+        # v3 = v2 + dt/2 * F(x') -> v2 = v3 - dt/2 * F(x')
+        v = v - (dt / 2) * force_fn(x) / self.mass
+
+        # x' = x + dt * v2 -> x = x' - dt * v2
+        x = x - dt * v
+
+        # v2 = v1 + dt/2 * F(x) -> v1 = v2 - dt/2 * F(x)
+        v = v - (dt / 2) * force_fn(x) / self.mass
+
+        # 1. Undo first thermostat half-step (Step 3, 2, 1)
+
+        # Step 3 reverse
+        v2_sq = (v**2).sum(dim=-1)
+        alpha = alpha - (dt / 4) * (v2_sq - ndof * self.kT) / self.Q
+
+        # Step 2 reverse
+        v = v * torch.exp(alpha.unsqueeze(-1) * dt / 2) # Note positive exponent
+
+        # Step 1 reverse
+        v2_sq = (v**2).sum(dim=-1)
+        alpha = alpha - (dt / 4) * (v2_sq - ndof * self.kT) / self.Q
+
+        return x, v, alpha
+
     def step(self, x: torch.Tensor, v: torch.Tensor, alpha: torch.Tensor,
              force_fn: Callable[[torch.Tensor], torch.Tensor], dt: float
              ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -1186,23 +1242,43 @@ class ContinuousAdjointNoseHoover(nn.Module):
 
     def adjoint_backward(self, loss_grad_x: List[Optional[torch.Tensor]],
                         loss_grad_v: List[Optional[torch.Tensor]],
-                        traj_x: torch.Tensor, traj_v: torch.Tensor,
-                        traj_alpha: torch.Tensor,
+                        traj_x: Optional[torch.Tensor], traj_v: Optional[torch.Tensor],
+                        traj_alpha: Optional[torch.Tensor],
                         force_fn: Callable[[torch.Tensor], torch.Tensor],
-                        dt: float) -> Dict[str, torch.Tensor]:
+                        dt: float,
+                        final_state: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
+                        n_steps: Optional[int] = None) -> Dict[str, torch.Tensor]:
         """Integrate adjoint ODEs backward through trajectory.
 
+        Supports two modes:
+        1. Stored trajectory (O(T) memory): Pass `traj_x`, `traj_v`, `traj_alpha`.
+        2. Reconstructed trajectory (O(1) memory): Pass `final_state` and `n_steps`.
+           The forward trajectory is reconstructed in reverse using `reverse_step`.
+
         Args:
-            loss_grad_x: List of gradients ∂L/∂x at each stored timestep (or None)
-            loss_grad_v: List of gradients ∂L/∂v at each stored timestep (or None)
-            traj_x, traj_v, traj_alpha: Forward trajectory
-            force_fn: Force function
-            dt: Time step used in forward pass
+            loss_grad_x: List of gradients ∂L/∂x at each stored timestep (or None).
+            loss_grad_v: List of gradients ∂L/∂v at each stored timestep (or None).
+            traj_x, traj_v, traj_alpha: Forward trajectory (optional if final_state provided).
+            force_fn: Force function.
+            dt: Time step used in forward pass.
+            final_state: (x, v, alpha) at the end of simulation. Required if traj is None.
+            n_steps: Number of steps to reverse. Required if traj is None.
 
         Returns:
             Dictionary of parameter gradients: {'kT': grad_kT, 'mass': grad_mass, 'Q': grad_Q}
         """
-        T = len(traj_x)
+        # Determine mode
+        if traj_x is not None:
+            T = len(traj_x)
+            device = traj_x.device
+            # Use stored trajectory
+            curr_x, curr_v, curr_alpha = None, None, None # Not used
+        else:
+            if final_state is None or n_steps is None:
+                raise ValueError("Must provide either full trajectory OR final_state and n_steps for O(1) memory.")
+            T = n_steps + 1
+            curr_x, curr_v, curr_alpha = final_state
+            device = curr_x.device
 
         # Pad loss gradients if needed
         # User typically passes gradients at final timestep, so pad with Nones at the FRONT
@@ -1212,22 +1288,42 @@ class ContinuousAdjointNoseHoover(nn.Module):
             loss_grad_v = [None] * (T - len(loss_grad_v)) + list(loss_grad_v)
 
         # Initialize adjoint variables from final loss gradients
-        lambda_x = loss_grad_x[-1] if loss_grad_x[-1] is not None else torch.zeros_like(traj_x[-1])
-        lambda_v = loss_grad_v[-1] if loss_grad_v[-1] is not None else torch.zeros_like(traj_v[-1])
-        lambda_alpha = torch.zeros_like(traj_alpha[-1])
+        # Use final state from traj or curr_state
+        if traj_x is not None:
+            final_x_val = traj_x[-1]
+            final_v_val = traj_v[-1]
+            final_alpha_val = traj_alpha[-1]
+        else:
+            final_x_val = curr_x
+            final_v_val = curr_v
+            final_alpha_val = curr_alpha
+
+        lambda_x = loss_grad_x[-1] if loss_grad_x[-1] is not None else torch.zeros_like(final_x_val)
+        lambda_v = loss_grad_v[-1] if loss_grad_v[-1] is not None else torch.zeros_like(final_v_val)
+        lambda_alpha = torch.zeros_like(final_alpha_val)
 
         # Accumulate parameter gradients (on same device as trajectory)
-        device = traj_x.device
         grad_kT = torch.zeros((), device=device, dtype=self.kT.dtype)
         grad_mass = torch.zeros((), device=device, dtype=self.mass.dtype)
         grad_Q = torch.zeros((), device=device, dtype=self.Q.dtype)
 
         # Backward integration
         for t in range(T - 1, 0, -1):
+            if traj_x is not None:
+                # Use stored state at time t
+                # Note: adjoint equation uses state at t to compute derivative for interval [t-1, t]?
+                # Actually, continuous adjoint integrates from T to 0.
+                # At step t -> t-1, we use state at t (Explicit Euler) or t-1 (Implicit)?
+                # Implementation uses state at t (traj_x[t]) to compute derivatives.
+                state_x, state_v, state_alpha = traj_x[t], traj_v[t], traj_alpha[t]
+            else:
+                # Use current reconstructed state (which corresponds to time t)
+                state_x, state_v, state_alpha = curr_x, curr_v, curr_alpha
+
             # One adjoint step backward
             lambda_x, lambda_v, lambda_alpha, d_kT, d_mass, d_Q = self.adjoint_step_backward(
                 lambda_x, lambda_v, lambda_alpha,
-                traj_x[t], traj_v[t], traj_alpha[t],
+                state_x, state_v, state_alpha,
                 force_fn, dt
             )
 
@@ -1235,6 +1331,10 @@ class ContinuousAdjointNoseHoover(nn.Module):
             grad_kT += d_kT
             grad_mass += d_mass
             grad_Q += d_Q
+
+            # If using O(1) memory, reconstruct state at t-1 for next step
+            if traj_x is None:
+                curr_x, curr_v, curr_alpha = self.reverse_step(curr_x, curr_v, curr_alpha, force_fn, dt)
 
             # Add loss gradient contributions at this timestep
             if loss_grad_x[t - 1] is not None:
