@@ -257,9 +257,19 @@ class LennardJones(Potential):
     def energy(self, x: torch.Tensor) -> torch.Tensor:
         """x: (..., n_particles, dim) -> (...)"""
         n = x.shape[-2]
+        device = x.device
         
         # Get indices for upper triangular part (i < j)
-        idx_i, idx_j = torch.triu_indices(n, n, offset=1, device=x.device)
+        # Use simple single-slot caching to avoid re-generating indices
+        # while preventing memory leaks with varying N
+        if (not hasattr(self, '_indices_cache') or
+            self._indices_cache[0] != n or
+            self._indices_cache[1] != device):
+
+            idx_i, idx_j = torch.triu_indices(n, n, offset=1, device=device)
+            self._indices_cache = (n, device, idx_i, idx_j)
+        else:
+            _, _, idx_i, idx_j = self._indices_cache
         
         # Advanced indexing to gather particle positions for pairs
         # x: (..., n, dim) -> xi, xj: (..., n_pairs, dim)
@@ -374,9 +384,10 @@ class LennardJonesVerlet(LennardJones):
                  
             diff = x - self.last_update_x
             diff = self._minimum_image(diff)
-            max_disp = diff.norm(dim=-1).max()
+            # Compare squared distances to avoid expensive sqrt
+            max_disp_sq = (diff**2).sum(dim=-1).max()
             
-            return max_disp > (self.skin * 0.5)
+            return max_disp_sq > (self.skin * 0.5)**2
 
     def energy(self, x: torch.Tensor) -> torch.Tensor:
         """Compute energy using stored neighbor list. O(N_neighbors)."""
