@@ -26,7 +26,70 @@ ForceFunc = Callable[[torch.Tensor], torch.Tensor]
 GradFunc = Callable[[torch.Tensor], torch.Tensor]  # For ESH: gradient of energy
 
 
-class OverdampedLangevin(nn.Module):
+class Integrator(nn.Module):
+    """Base class for all integrators.
+
+    Provides the common run loop logic via _integrate method.
+    """
+
+    def forward(self, *args, **kwargs):
+        """Alias for run() to support functional calls."""
+        return self.run(*args, **kwargs)
+
+    def _integrate(self, state: tuple[torch.Tensor, ...], step_fn: Callable,
+                   n_steps: int, store_every: int, final_only: bool,
+                   store_indices: list[int] | None = None) -> tuple[torch.Tensor, ...]:
+        """Generic integration loop.
+
+        Args:
+            state: Initial state tuple (e.g. (x,) or (x, v)).
+            step_fn: Function that takes unpacked state and returns new unpacked state.
+            n_steps: Number of integration steps.
+            store_every: Store interval.
+            final_only: If True, only return final state.
+            store_indices: Indices of state variables to store in trajectory.
+                           If None, stores all variables.
+
+        Returns:
+            Tuple of trajectories or final states.
+        """
+        if store_indices is None:
+            store_indices = range(len(state))
+
+        if final_only:
+            for _ in range(n_steps):
+                state = step_fn(*state)
+                if not isinstance(state, tuple):
+                    state = (state,)
+
+            # Return final state with added batch dim
+            results = tuple(state[i].unsqueeze(0) for i in store_indices)
+            return results
+
+        # Prepare trajectory storage
+        n_stored = n_steps // store_every + 1
+        trajs = [torch.empty((n_stored, *state[i].shape), dtype=state[i].dtype, device=state[i].device)
+                 for i in store_indices]
+
+        # Store initial state
+        for i, traj in enumerate(trajs):
+            traj[0] = state[store_indices[i]]
+
+        idx = 1
+        for i in range(1, n_steps + 1):
+            state = step_fn(*state)
+            if not isinstance(state, tuple):
+                state = (state,)
+
+            if i % store_every == 0:
+                for j, traj in enumerate(trajs):
+                    traj[idx] = state[store_indices[j]]
+                idx += 1
+
+        return tuple(trajs)
+
+
+class OverdampedLangevin(Integrator):
     """Overdamped Langevin dynamics: dx = F/γ dt + √(2kT/γ) dW.
     
     High-friction limit where inertia is negligible.
@@ -47,10 +110,6 @@ class OverdampedLangevin(nn.Module):
         force = force_fn(x)
         noise_scale = torch.sqrt(2 * self.kT * dt / self.gamma)
         return x + (force / self.gamma) * dt + noise_scale * torch.randn_like(x)
-    
-    def forward(self, *args, **kwargs):
-        """Alias for run() to support functional calls."""
-        return self.run(*args, **kwargs)
 
     def run(self, x0: torch.Tensor, force_fn: ForceFunc, dt: float, 
             n_steps: int, store_every: int = 1, final_only: bool = False) -> torch.Tensor:
@@ -67,27 +126,14 @@ class OverdampedLangevin(nn.Module):
         Returns:
             Trajectory of shape (n_stored, ..., dim) or (1, ..., dim) if final_only
         """
-        x = x0
+        state = (x0,)
+        step_fn = lambda x: self.step(x, force_fn, dt)
         
-        if final_only:
-            for i in range(n_steps):
-                x = self.step(x, force_fn, dt)
-            return x.unsqueeze(0)
-        
-        n_stored = n_steps // store_every + 1
-        traj = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
-        traj[0] = x0
-        
-        idx = 1
-        for i in range(1, n_steps + 1):
-            x = self.step(x, force_fn, dt)
-            if i % store_every == 0:
-                traj[idx] = x
-                idx += 1
-        return traj
+        result = self._integrate(state, step_fn, n_steps, store_every, final_only)
+        return result[0]
 
 
-class BAOAB(nn.Module):
+class BAOAB(Integrator):
     """BAOAB splitting for underdamped Langevin dynamics.
     
     B: velocity kick (half), A: position drift (half), O: Ornstein-Uhlenbeck noise,
@@ -119,10 +165,6 @@ class BAOAB(nn.Module):
         v = v + (dt / 2) * force_fn(x) / self.mass
         return x, v
 
-    def forward(self, *args, **kwargs):
-        """Alias for run() to support functional calls."""
-        return self.run(*args, **kwargs)
-    
     def run(self, x0: torch.Tensor, v0: torch.Tensor | None, force_fn: ForceFunc,
             dt: float, n_steps: int, store_every: int = 1, final_only: bool = False
             ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -140,32 +182,15 @@ class BAOAB(nn.Module):
         Returns:
             (traj_x, traj_v): Trajectories of shape (n_stored, ..., dim) or (1, ..., dim) if final_only
         """
-        x = x0
         v = v0 if v0 is not None else torch.randn_like(x0) * torch.sqrt(self.kT / self.mass)
         
-        if final_only:
-            for i in range(n_steps):
-                x, v = self.step(x, v, force_fn, dt)
-            return x.unsqueeze(0), v.unsqueeze(0)
+        state = (x0, v)
+        step_fn = lambda x, v: self.step(x, v, force_fn, dt)
         
-        n_stored = n_steps // store_every + 1
-        traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
-        traj_v = torch.empty((n_stored, *v.shape), dtype=v.dtype, device=v.device)
-        
-        traj_x[0] = x0
-        traj_v[0] = v
-        
-        idx = 1
-        for i in range(1, n_steps + 1):
-            x, v = self.step(x, v, force_fn, dt)
-            if i % store_every == 0:
-                traj_x[idx] = x
-                traj_v[idx] = v
-                idx += 1
-        return traj_x, traj_v
+        return self._integrate(state, step_fn, n_steps, store_every, final_only)
 
 
-class VelocityVerlet(nn.Module):
+class VelocityVerlet(Integrator):
     """Symplectic velocity Verlet integrator (NVE ensemble).
     
     Preserves phase-space volume and has excellent energy conservation.
@@ -187,10 +212,6 @@ class VelocityVerlet(nn.Module):
         v = v + (dt / 2) * force_fn(x) / self.mass
         return x, v
     
-    def forward(self, *args, **kwargs):
-        """Alias for run() to support functional calls."""
-        return self.run(*args, **kwargs)
-
     def run(self, x0: torch.Tensor, v0: torch.Tensor, force_fn: ForceFunc,
             dt: float, n_steps: int, store_every: int = 1, final_only: bool = False
             ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -208,31 +229,13 @@ class VelocityVerlet(nn.Module):
         Returns:
             (traj_x, traj_v): Trajectories of shape (n_stored, ..., dim) or (1, ..., dim) if final_only
         """
-        x, v = x0, v0
+        state = (x0, v0)
+        step_fn = lambda x, v: self.step(x, v, force_fn, dt)
         
-        if final_only:
-            for i in range(n_steps):
-                x, v = self.step(x, v, force_fn, dt)
-            return x.unsqueeze(0), v.unsqueeze(0)
-        
-        n_stored = n_steps // store_every + 1
-        traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
-        traj_v = torch.empty((n_stored, *v0.shape), dtype=v0.dtype, device=v0.device)
-        
-        traj_x[0] = x0
-        traj_v[0] = v0
-        
-        idx = 1
-        for i in range(1, n_steps + 1):
-            x, v = self.step(x, v, force_fn, dt)
-            if i % store_every == 0:
-                traj_x[idx] = x
-                traj_v[idx] = v
-                idx += 1
-        return traj_x, traj_v
+        return self._integrate(state, step_fn, n_steps, store_every, final_only)
 
 
-class NoseHoover(nn.Module):
+class NoseHoover(Integrator):
     """Single Nosé-Hoover thermostat for deterministic canonical sampling.
     
     Uses the Kleinerman 08 symmetric integration scheme. Simpler and more
@@ -293,10 +296,6 @@ class NoseHoover(nn.Module):
         alpha = alpha + (dt / 4) * (v2 - ndof * self.kT) / self.Q
         
         return x, v, alpha
-    
-    def forward(self, *args, **kwargs):
-        """Alias for run() to support functional calls."""
-        return self.run(*args, **kwargs)
 
     def run(self, x0: torch.Tensor, v0: torch.Tensor | None, force_fn: ForceFunc,
             dt: float, n_steps: int, store_every: int = 1, final_only: bool = False
@@ -315,34 +314,17 @@ class NoseHoover(nn.Module):
         Returns:
             (traj_x, traj_v): Trajectories of shape (n_stored, ..., dim) or (1, ..., dim) if final_only
         """
-        x = x0
         v = v0 if v0 is not None else torch.randn_like(x0) * torch.sqrt(self.kT / self.mass)
         alpha = torch.zeros(x0.shape[:-1], device=x0.device, dtype=x0.dtype)
         
-        if final_only:
-            # Only run to final state, no trajectory storage
-            for i in range(n_steps):
-                x, v, alpha = self.step(x, v, alpha, force_fn, dt)
-            return x.unsqueeze(0), v.unsqueeze(0)
+        state = (x0, v, alpha)
+        step_fn = lambda x, v, alpha: self.step(x, v, alpha, force_fn, dt)
         
-        n_stored = n_steps // store_every + 1
-        traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
-        traj_v = torch.empty((n_stored, *v.shape), dtype=v.dtype, device=v.device)
-        
-        traj_x[0] = x0
-        traj_v[0] = v
-        
-        idx = 1
-        for i in range(1, n_steps + 1):
-            x, v, alpha = self.step(x, v, alpha, force_fn, dt)
-            if i % store_every == 0:
-                traj_x[idx] = x
-                traj_v[idx] = v
-                idx += 1
-        return traj_x, traj_v
+        # We only return x and v, so store_indices=[0, 1]
+        return self._integrate(state, step_fn, n_steps, store_every, final_only, store_indices=[0, 1])
 
 
-class NoseHooverChain(nn.Module):
+class NoseHooverChain(Integrator):
     """Nosé-Hoover chain thermostat for deterministic canonical sampling.
     
     Extends phase space with thermostat variables to sample NVT ensemble
@@ -435,35 +417,18 @@ class NoseHooverChain(nn.Module):
         Returns:
             (traj_x, traj_v): Trajectories of shape (n_stored, ..., dim) or (1, ..., dim) if final_only
         """
-        x = x0
         v = v0 if v0 is not None else torch.randn_like(x0) * torch.sqrt(self.kT / self.mass)
         ndof = x0.shape[-1]
         xi_shape = x0.shape[:-1] + (self.n_chain,)
         xi = torch.zeros(xi_shape, device=x0.device, dtype=x0.dtype)
         
-        if final_only:
-            for i in range(n_steps):
-                x, v, xi = self.step(x, v, xi, force_fn, dt, ndof)
-            return x.unsqueeze(0), v.unsqueeze(0)
+        state = (x0, v, xi)
+        step_fn = lambda x, v, xi: self.step(x, v, xi, force_fn, dt, ndof)
         
-        n_stored = n_steps // store_every + 1
-        traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
-        traj_v = torch.empty((n_stored, *v.shape), dtype=v.dtype, device=v.device)
-        
-        traj_x[0] = x0
-        traj_v[0] = v
-        
-        idx = 1
-        for i in range(1, n_steps + 1):
-            x, v, xi = self.step(x, v, xi, force_fn, dt, ndof)
-            if i % store_every == 0:
-                traj_x[idx] = x
-                traj_v[idx] = v
-                idx += 1
-        return traj_x, traj_v
+        return self._integrate(state, step_fn, n_steps, store_every, final_only, store_indices=[0, 1])
 
 
-class ESH(nn.Module):
+class ESH(Integrator):
     """Energy Sampling Hamiltonian dynamics for deterministic ergodic sampling.
     
     Uses non-Newtonian kinetic energy K(v) = d/2 * log(v²/d).
@@ -609,33 +574,13 @@ class ESH(nn.Module):
         
         r = torch.zeros(x0.shape[:-1], device=x0.device, dtype=x0.dtype)
         
-        if final_only:
-            for i in range(n_steps):
-                x, u, r = self.step(x, u, r, grad_fn, eps)
-            return x.unsqueeze(0), u.unsqueeze(0), r.unsqueeze(0)
+        state = (x, u, r)
+        step_fn = lambda x, u, r: self.step(x, u, r, grad_fn, dt)
         
-        n_stored = n_steps // store_every + 1
-        traj_x = torch.empty((n_stored, *x0.shape), dtype=x0.dtype, device=x0.device)
-        traj_u = torch.empty((n_stored, *u.shape), dtype=u.dtype, device=u.device)
-        traj_r = torch.empty((n_stored, *r.shape), dtype=r.dtype, device=r.device)
-        
-        traj_x[0] = x0
-        traj_u[0] = u
-        traj_r[0] = r
-        
-        idx = 1
-        for i in range(1, n_steps + 1):
-            x, u, r = self.step(x, u, r, grad_fn, eps)
-            if i % store_every == 0:
-                traj_x[idx] = x
-                traj_u[idx] = u
-                traj_r[idx] = r
-                idx += 1
-        
-        return traj_x, traj_u, traj_r
+        return self._integrate(state, step_fn, n_steps, store_every, final_only)
 
 
-class GLE(nn.Module):
+class GLE(Integrator):
     """Generalized Langevin Equation with colored noise.
     
     Implements dynamics with memory kernel using Prony series decomposition:
@@ -757,27 +702,10 @@ class GLE(nn.Module):
         s_shape = x0.shape + (self.n_modes,)
         s = torch.randn(s_shape, device=device, dtype=dtype) * torch.sqrt(c * kT)
         
-        if final_only:
-            for i in range(n_steps):
-                x, v, s = self.step(x, v, s, force_fn, dt)
-            return x.unsqueeze(0), v.unsqueeze(0)
+        state = (x, v, s)
+        step_fn = lambda x, v, s: self.step(x, v, s, force_fn, dt)
         
-        n_stored = n_steps // store_every + 1
-        traj_x = torch.empty((n_stored, *x0.shape), dtype=dtype, device=device)
-        traj_v = torch.empty((n_stored, *v.shape), dtype=dtype, device=device)
-        
-        traj_x[0] = x0
-        traj_v[0] = v
-        
-        idx = 1
-        for i in range(1, n_steps + 1):
-            x, v, s = self.step(x, v, s, force_fn, dt)
-            if i % store_every == 0:
-                traj_x[idx] = x
-                traj_v[idx] = v
-                idx += 1
-        
-        return traj_x, traj_v
+        return self._integrate(state, step_fn, n_steps, store_every, final_only, store_indices=[0, 1])
 
 
 def kinetic_energy(v: torch.Tensor, mass: float = 1.0) -> torch.Tensor:
@@ -807,7 +735,7 @@ if __name__ == "__main__":
     dt = 0.01
     n_steps = 100
     
-    # Overdamped Langevin
+    # OverdampedLangevin
     od = OverdampedLangevin(gamma=1.0, kT=1.0)
     traj = od.run(x0, force_fn, dt, n_steps)
     assert traj.shape == (n_steps // 1 + 1, 10, 2), f"OverdampedLangevin: {traj.shape}"
