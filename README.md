@@ -72,7 +72,7 @@ For deterministic thermostats like Nosé-Hoover, we provide specialized adjoint 
 **Key findings**:
 - **Discrete adjoint matches BPTT to machine precision** (~10⁻⁷ relative error)
 - **Continuous adjoint has O(dt) error** (~5-15% at dt=0.01, decreases linearly with dt)
-- Both methods enable gradient-based optimization of thermostat parameters (kT, mass, Q)
+- **Both methods enable gradient-based optimization of thermostat parameters** (kT, mass, Q)
 
 ```python
 from uni_diffsim.gradient_estimators import DiscreteAdjointNoseHoover
@@ -153,4 +153,3 @@ x.sum().backward()  # k.grad is defined
 ```bash
 pytest tests/ -v
 ```
-
