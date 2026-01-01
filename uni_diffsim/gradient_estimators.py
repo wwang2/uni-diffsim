@@ -261,95 +261,52 @@ class ReinforceEstimator(nn.Module):
 
         grads = {}
 
-        if self.baseline == "optimal":
-            # Optimal baseline implementation
-            # b* = E[O * (dU/dθ)^2] / E[(dU/dθ)^2] (element-wise)
+        # Compute ⟨O⟩
+        O_mean = O.mean()
 
-            # 1. Compute per-sample gradients for all parameters
-            # This uses torch.func for efficiency
-            grads_per_sample = self._compute_per_sample_grads(samples_flat)
-
-            # 2. Compute gradients with optimal baseline
-            for name, param in self.potential.named_parameters():
-                if not param.requires_grad or name not in grads_per_sample:
-                    continue
-
-                g = grads_per_sample[name] # (n_samples, *param_shape)
-
-                # Check shapes
-                if g.shape[0] != n_samples:
-                    # Should not happen with vmap
-                    continue
-
-                # Ensure O broadcasts correctly
-                # O is (n_samples,) -> (n_samples, 1, ..., 1)
-                view_shape = [n_samples] + [1] * (g.ndim - 1)
-                O_view = O.view(view_shape)
-
-                g_sq = g.square()
-
-                # Compute baseline numerator and denominator (sum over samples)
-                denom = g_sq.sum(dim=0) # (*param_shape)
-                num = (O_view * g_sq).sum(dim=0) # (*param_shape)
-
-                # Avoid division by zero (if gradient is 0, baseline doesn't matter, set to 0)
-                # mask where denom > epsilon
-                mask = denom.abs() > 1e-10
-                b_star = torch.zeros_like(denom)
-                b_star[mask] = num[mask] / denom[mask]
-
-                # Compute gradient estimate: -β * mean((O - b*) * g)
-                # O - b* broadcasts
-                diff = O_view - b_star.unsqueeze(0)
-                grad_est = -self.beta * (diff * g).mean(dim=0)
-
-                grads[name] = grad_est
-
+        # Apply baseline for variance reduction
+        if self.baseline is None or self.baseline == "optimal":
+            # Default: subtract mean (standard REINFORCE).
+            # Note on 'optimal': For covariance estimation Cov(O, g), the 'optimal' constant baseline
+            # that ensures unbiasedness is b = E[O]. Since E[O] is unknown, we use sample mean.
+            # Using b* = E[O g^2]/E[g^2] (which minimizes second moment of (O-b)g) leads to bias
+            # because E[g] != 0 for energy gradients.
+            O_centered = O - O_mean
+        elif callable(self.baseline):
+            b = self.baseline(samples_flat)
+            O_centered = O - b
+        elif isinstance(self.baseline, torch.Tensor):
+            O_centered = O - self.baseline
         else:
-            # Standard baseline (constant or mean) logic
+            O_centered = O - O_mean
 
-            # Compute ⟨O⟩
-            O_mean = O.mean()
+        # Compute energy
+        U = self.potential.energy(samples_flat)
 
-            # Apply baseline for variance reduction
-            if self.baseline is None:
-                # Default: subtract mean (standard REINFORCE)
-                O_centered = O - O_mean
-            elif callable(self.baseline):
-                b = self.baseline(samples_flat)
-                O_centered = O - b
-            elif isinstance(self.baseline, torch.Tensor):
-                O_centered = O - self.baseline
-            else:
-                O_centered = O - O_mean
+        for name, param in self.potential.named_parameters():
+            if not param.requires_grad:
+                continue
 
-            # Compute energy
-            U = self.potential.energy(samples_flat)
+            # Compute dU/dθ via autograd
+            # Strategy: Compute ⟨O * dU/dθ⟩ using autograd's chain rule
+            # d/dθ ⟨O * U⟩ = ⟨O * dU/dθ⟩ (when O doesn't depend on θ)
 
-            for name, param in self.potential.named_parameters():
-                if not param.requires_grad:
-                    continue
+            # Weighted sum: sum(O * U)
+            weighted_U = (O_centered * U).sum()
 
-                # Compute dU/dθ via autograd
-                # Strategy: Compute ⟨O * dU/dθ⟩ using autograd's chain rule
-                # d/dθ ⟨O * U⟩ = ⟨O * dU/dθ⟩ (when O doesn't depend on θ)
+            # Gradient of weighted sum
+            grad_weighted = torch.autograd.grad(
+                weighted_U,
+                param,
+                create_graph=True,
+                retain_graph=True,
+                allow_unused=True
+            )[0]
 
-                # Weighted sum: sum(O * U)
-                weighted_U = (O_centered * U).sum()
-
-                # Gradient of weighted sum
-                grad_weighted = torch.autograd.grad(
-                    weighted_U,
-                    param,
-                    create_graph=True,
-                    retain_graph=True,
-                    allow_unused=True
-                )[0]
-
-                if grad_weighted is not None:
-                    # REINFORCE gradient: -β * [⟨(O - b) * dU/dθ⟩]
-                    grad_reinforce = -self.beta * (grad_weighted / n_samples)
-                    grads[name] = grad_reinforce
+            if grad_weighted is not None:
+                # REINFORCE gradient: -β * [⟨(O - b) * dU/dθ⟩]
+                grad_reinforce = -self.beta * (grad_weighted / n_samples)
+                grads[name] = grad_reinforce
 
         return grads
 
