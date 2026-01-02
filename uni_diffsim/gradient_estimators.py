@@ -99,6 +99,7 @@ class ReinforceEstimator(nn.Module):
         self._sum_O = None
         self._sum_O_dU = {}  # param_name -> accumulated O * dU/dθ
         self._sum_dU = {}    # param_name -> accumulated dU/dθ
+        self._sum_dO = {}    # param_name -> accumulated ∂O/∂θ
 
     def _flatten_samples(self, samples: torch.Tensor) -> torch.Tensor:
         """Flatten samples based on potential event dimension.
@@ -236,41 +237,30 @@ class ReinforceEstimator(nn.Module):
         else:
             O_centered = O - O_mean
 
-        # Compute per-sample gradients dU_i/dθ
-        grads = {}
+        # Compute surrogate loss to handle both terms simultaneously:
+        # 1. Pathwise derivative: ⟨∇_θ O⟩
+        # 2. Score function term: -β ⟨(O - b) ∇_θ U⟩
 
-        # Compute energy and its gradients
+        # L = (O - β * (O_centered.detach() * U)).mean()
+        # ∇L = ⟨∇O⟩ - β ⟨(O-b) ∇U⟩  (using chain rule for U term)
+
         U = self.potential.energy(samples_flat)
+        surrogate_loss = (O - self.beta * (O_centered.detach() * U)).mean()
 
+        # Compute gradients all at once
+        grads = {}
         for name, param in self.potential.named_parameters():
-            if not param.requires_grad:
-                continue
+            if param.requires_grad:
+                grad = torch.autograd.grad(
+                    surrogate_loss,
+                    param,
+                    create_graph=True,
+                    retain_graph=True,
+                    allow_unused=True
+                )[0]
 
-            # Compute dU/dθ via autograd
-            # Strategy: Compute ⟨O * dU/dθ⟩ using autograd's chain rule
-            # d/dθ ⟨O * U⟩ = ⟨O * dU/dθ⟩ (when O doesn't depend on θ)
-
-            # Weighted sum: sum(O * U)
-            weighted_U = (O_centered * U).sum()
-
-            # Gradient of weighted sum
-            grad_weighted = torch.autograd.grad(
-                weighted_U,
-                param,
-                create_graph=True,
-                retain_graph=True,
-                allow_unused=True
-            )[0]
-
-            # Also compute ⟨dU/dθ⟩ for the baseline correction (if needed explicitly)
-            # Actually, O_centered already handles the baseline implicitly:
-            # sum((O - b) * dU/dθ) = sum(O * dU/dθ) - b * sum(dU/dθ)
-            # This is exactly what we want.
-
-            if grad_weighted is not None:
-                # REINFORCE gradient: -β * [⟨(O - b) * dU/dθ⟩]
-                grad_reinforce = -self.beta * (grad_weighted / n_samples)
-                grads[name] = grad_reinforce
+                if grad is not None:
+                    grads[name] = grad
 
         return grads
 
@@ -307,6 +297,26 @@ class ReinforceEstimator(nn.Module):
         else:
             self._sum_O = self._sum_O + O.sum()
 
+        # Accumulate ⟨∂O/∂θ⟩ if O depends on parameters
+        if O.requires_grad:
+            for name, param in self.potential.named_parameters():
+                if param.requires_grad:
+                    grad_O = torch.autograd.grad(
+                        O.sum(), param,
+                        create_graph=False, retain_graph=True, allow_unused=True
+                    )[0]
+
+                    if grad_O is not None:
+                        # Initialize accumulator if missing (e.g. from older state)
+                        if not hasattr(self, '_sum_dO'):
+                            self._sum_dO = {}
+
+                        if name not in self._sum_dO:
+                            self._sum_dO[name] = grad_O.detach()
+                        else:
+                            self._sum_dO[name] = self._sum_dO[name] + grad_O.detach()
+
+
         # Compute and accumulate O * dU/dθ terms
         U = self.potential.energy(samples_flat)
 
@@ -315,7 +325,8 @@ class ReinforceEstimator(nn.Module):
                 continue
 
             # ⟨O * dU/dθ⟩ contribution
-            weighted_U = (O * U).sum()
+            # DETACH O here for REINFORCE term
+            weighted_U = (O.detach() * U).sum()
             grad = torch.autograd.grad(
                 weighted_U, param,
                 create_graph=True, retain_graph=True, allow_unused=True
@@ -352,14 +363,26 @@ class ReinforceEstimator(nn.Module):
             raise RuntimeError("No samples accumulated. Call accumulate() first.")
 
         n = self._n_samples
-        O_mean = self._sum_O / n
+        # O_mean should be a value (detached) for REINFORCE calculation
+        O_mean = (self._sum_O / n).detach()
 
         grads = {}
         for name in self._sum_O_dU:
             # REINFORCE: -β * [⟨O * dU/dθ⟩ - ⟨O⟩ * ⟨dU/dθ⟩]
             mean_O_dU = self._sum_O_dU[name] / n
             mean_dU = self._sum_dU[name] / n
-            grads[name] = -self.beta * (mean_O_dU - O_mean * mean_dU)
+
+            grad_reinforce = -self.beta * (mean_O_dU - O_mean * mean_dU)
+            grads[name] = grad_reinforce
+
+        # Add ⟨∂O/∂θ⟩ contribution if present
+        if hasattr(self, '_sum_dO'):
+             for name, sum_dO in self._sum_dO.items():
+                 mean_dO = sum_dO / n
+                 if name in grads:
+                     grads[name] = grads[name] + mean_dO
+                 else:
+                     grads[name] = mean_dO
 
         self._reset_accumulators()
         return grads
