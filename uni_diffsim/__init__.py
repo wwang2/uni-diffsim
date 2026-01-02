@@ -3,10 +3,9 @@
 from .device import get_device, to_device, available_devices
 from .potentials import Potential, DoubleWell, AsymmetricDoubleWell, MullerBrown, LennardJones, Harmonic
 from .integrators import (
-    OverdampedLangevin, BAOAB, VelocityVerlet, NoseHooverChain, ESH, GLE,
+    OverdampedLangevin, BAOAB, VelocityVerlet, NoseHoover, NoseHooverChain, ESH, GLE,
     kinetic_energy, temperature,
 )
-from .simulation import run_simulation, generate_trajectory
 from .gradient_estimators import (
     ReinforceEstimator, GirsanovEstimator, ReweightingLoss,
     ImplicitDiffEstimator,
@@ -22,10 +21,8 @@ __all__ = [
     # Potentials
     "Potential", "DoubleWell", "AsymmetricDoubleWell", "MullerBrown", "LennardJones", "Harmonic",
     # Integrators
-    "OverdampedLangevin", "BAOAB", "VelocityVerlet", "NoseHooverChain", "ESH", "GLE",
+    "OverdampedLangevin", "BAOAB", "VelocityVerlet", "NoseHoover", "NoseHooverChain", "ESH", "GLE",
     "kinetic_energy", "temperature",
-    # Simulation
-    "run_simulation", "generate_trajectory",
     # Gradient Estimators
     "ReinforceEstimator", "GirsanovEstimator", "ReweightingLoss",
     "ImplicitDiffEstimator",
