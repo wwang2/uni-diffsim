@@ -48,6 +48,7 @@ class ReinforceEstimator(nn.Module):
     - Chaotic systems where BPTT fails
     - Long trajectories where memory is limited
     - Non-differentiable integrators
+    - Equibrium sampling
 
     The estimator can be used in two modes:
     1. Stateless: Call estimate_gradient() with samples

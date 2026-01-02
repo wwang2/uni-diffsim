@@ -10,8 +10,11 @@ Key conceptual axes visualized:
 1. **Path vs Ensemble**: Single trajectory memory vs statistical forgetting
 2. **Forward vs Backward**: Sensitivity propagation direction
 3. **SDE vs ODE**: Stochastic noise vs deterministic thermostat
-4. **REINFORCE vs Girsanov**: Score function vs path reweighting
+4. **BPTT vs Likelihood Ratio**: Backprop (Jacobian chain) vs path score accumulation
 5. **Fine vs Coarse**: Sample-level (ML) vs observable-level matching
+
+Visual style: Particles bouncing in a double-well potential to convey
+"molecular simulation" rather than generic diffusion plots.
 
 Minimal axes/ticks to focus on concepts. Horizontal layout for compactness.
 """
@@ -19,12 +22,24 @@ Minimal axes/ticks to focus on concepts. Horizontal layout for compactness.
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
+import torch
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from uni_diffsim.plotting import apply_style, COLORS, LW
+from uni_diffsim.integrators import OverdampedLangevin, NoseHoover
+from uni_diffsim.potentials import Potential
+from uni_diffsim.device import get_device
+
+# =============================================================================
+# Configuration & Hardware Acceleration
+# =============================================================================
+
+DEVICE = get_device()
+torch.manual_seed(42)
+np.random.seed(42)
 
 apply_style()
 
@@ -43,39 +58,81 @@ ATLAS_COLORS = {
     'fine': '#BF616A',       # Red for fine-grained (ML)
     'coarse': '#5E81AC',     # Blue for coarse-grained (observable)
     'data': '#EBCB8B',       # Yellow for data points
+    'potential': '#E5E9F0',  # Light gray for potential well fill
+    'potential_line': '#4C566A',  # Darker gray for potential outline
+    'jacobian': '#D08770',   # Orange for Jacobian vectors (BPTT)
+    'lr_score': '#B48EAD',   # Purple for likelihood ratio scores
+    'particle': '#2E3440',   # Dark for particle markers
 }
 
 
-def generate_sde_trajectory(n_steps=150, dt=0.05, x0=0.0, drift_scale=0.1, 
-                            noise_scale=0.3, seed=None):
-    """Generate an Ornstein-Uhlenbeck-like SDE trajectory."""
-    if seed is not None:
-        np.random.seed(seed)
-    t = np.linspace(0, n_steps * dt, n_steps)
-    x = np.zeros(n_steps)
-    x[0] = x0
-    for i in range(1, n_steps):
-        x[i] = x[i-1] - drift_scale * x[i-1] * dt + noise_scale * np.sqrt(dt) * np.random.randn()
-    return t, x
+# =============================================================================
+# Double-Well Potential
+# =============================================================================
 
+class DoubleWell(Potential):
+    """Double-well potential: U(x) = a*(x^2 - b)^2"""
+    def __init__(self, a=1.0, b=0.5):
+        super().__init__()
+        self.a = torch.nn.Parameter(torch.tensor(a, device=DEVICE))
+        self.b = torch.nn.Parameter(torch.tensor(b, device=DEVICE))
+    
+    def energy(self, x):
+        return self.a * (x**2 - self.b)**2
+    
+POTENTIAL = DoubleWell(a=1.2, b=0.5).to(DEVICE)
 
-def generate_ode_trajectory(n_steps=150, dt=0.05, x0=0.0, v0=0.5, 
-                            thermostat_coupling=0.5, seed=None):
-    """Generate a Nosé-Hoover-like deterministic trajectory."""
-    if seed is not None:
-        np.random.seed(seed)
-    t = np.linspace(0, n_steps * dt, n_steps)
-    x = np.zeros(n_steps)
-    v = np.zeros(n_steps)
-    xi = np.zeros(n_steps)
-    x[0], v[0] = x0, v0
-    xi[0] = np.random.randn() * 0.1 if seed else 0.0
-    for i in range(1, n_steps):
-        force = -0.5 * x[i-1]
-        xi[i] = xi[i-1] + dt * (v[i-1]**2 - 1.0) * thermostat_coupling
-        v[i] = v[i-1] + dt * (force - xi[i-1] * v[i-1])
-        x[i] = x[i-1] + dt * v[i]
-    return t, x, xi
+def double_well_potential_np(x, a=0.8, b=0.5):
+    """Legacy helper for plotting."""
+    return a * (x**2 - b)**2
+
+# =============================================================================
+# Unified Simulation Helpers
+# =============================================================================
+
+def run_sim(integrator, x0, n_steps, dt, store_every=1):
+    """Unified runner for all integrators on DEVICE."""
+    x0 = x0.to(DEVICE)
+    if isinstance(integrator, NoseHoover):
+        traj_x, traj_v = integrator.run(x0, v0=None, force_fn=POTENTIAL.force, 
+                                       dt=dt, n_steps=n_steps, store_every=store_every)
+        return traj_x.detach().cpu().numpy(), traj_v.detach().cpu().numpy()
+    else:
+        traj_x = integrator.run(x0, force_fn=POTENTIAL.force, 
+                               dt=dt, n_steps=n_steps, store_every=store_every)
+        return traj_x.detach().cpu().numpy()
+
+# =============================================================================
+# Exemplar Trajectories - Single try, long simulation, fixed seed
+# =============================================================================
+
+# Global cache for the exemplar trajectory
+_EXEMPLAR_TRAJECTORY = None
+_EXEMPLAR_ODE_TRAJECTORY = None
+
+@torch.no_grad()
+def get_exemplar_trajectory():
+    """Shared SDE trajectory (cached)."""
+    global _EXEMPLAR_TRAJECTORY
+    if _EXEMPLAR_TRAJECTORY is None:
+        n_steps, dt = 250, 0.002
+        od = OverdampedLangevin(gamma=1.0, kT=0.15).to(DEVICE)
+        x0 = torch.tensor([-0.7], device=DEVICE)
+        traj = run_sim(od, x0, n_steps, dt)
+        _EXEMPLAR_TRAJECTORY = (np.linspace(0, 1, n_steps+1), traj[:, 0])
+    return _EXEMPLAR_TRAJECTORY
+
+@torch.no_grad()
+def get_exemplar_ode_trajectory():
+    """Shared ODE trajectory (cached)."""
+    global _EXEMPLAR_ODE_TRAJECTORY
+    if _EXEMPLAR_ODE_TRAJECTORY is None:
+        n_steps, dt = 1000, 0.02
+        nh = NoseHoover(kT=0.15, mass=1.0, Q=2.5).to(DEVICE)
+        x0 = torch.tensor([-0.7], device=DEVICE)
+        traj_x, traj_v = run_sim(nh, x0, n_steps, dt)
+        _EXEMPLAR_ODE_TRAJECTORY = (np.linspace(0, 1, n_steps+1), traj_x[:, 0], traj_v[:, 0])
+    return _EXEMPLAR_ODE_TRAJECTORY
 
 
 def clean_axis(ax):
@@ -87,6 +144,36 @@ def clean_axis(ax):
     ax.spines['bottom'].set_visible(False)
     ax.spines['left'].set_visible(False)
     ax.set_facecolor('#FAFBFC')
+
+
+def draw_energy_background(ax, barrier_height=0.6, alpha=0.6, t_range=(0, 4.5), y_range=(-1.1, 1.1)):
+    """Draw energy landscape as colored background gradient."""
+    from matplotlib.colors import LinearSegmentedColormap
+    
+    # Create a 2D grid for the background
+    t_grid = np.linspace(t_range[0], t_range[1], 100)
+    y_grid = np.linspace(y_range[0], y_range[1], 200)
+    T, Y = np.meshgrid(t_grid, y_grid)
+    
+    # Compute potential energy at each y position (independent of t)
+    U = double_well_potential_np(Y, a=barrier_height, b=0.5)
+    
+    # Normalize so that wells are at 0 and barrier peak is at 1
+    U_min = U.min()
+    U_max = U.max()
+    U_norm = (U - U_min) / (U_max - U_min + 1e-10)
+    
+    # Apply a power transform to increase contrast (make wells more distinct)
+    U_contrast = U_norm ** 0.5  # Compress high values, spread low values
+    
+    # Draw the background
+    ax.imshow(U_contrast, extent=[t_range[0], t_range[1], y_range[0], y_range[1]], 
+              origin='lower', aspect='auto', cmap="Greys", alpha=0.3, zorder=0)
+    
+    # # Add strong contour lines to clearly show the double-well structure
+    # contour_levels = [0.1, 0.3, 0.5, 0.7, 0.9]
+    # ax.contour(T, Y, U_norm, levels=contour_levels, colors='#1565C0',
+    #            alpha=0.4, linewidths=0.8, zorder=1, )
 
 
 def draw_flow_arrow(ax, t, x, idx, direction='forward', color='black', size=10):
@@ -111,57 +198,78 @@ def plot_path(ax):
     
     Pathwise: E[∇_x O · ∂x_T/∂θ] - explicit Jacobian Φ(T,t)
     Variance ~ exp(2λT) due to Lyapunov instability
+    
+    Visual: Single particle trajectory in double-well with sensitivity chain.
+    Shows barrier crossing events with lower barrier and longer simulation.
     """
-    t, x = generate_sde_trajectory(seed=42, n_steps=120)
-    ax.plot(t, x, color=ATLAS_COLORS['path_single'], lw=2, alpha=0.9)
+    # Get the exemplar trajectory (shared across panels)
+    t, x = get_exemplar_trajectory()
+    t_range = (t[0], t[-1])
+    
+    # Draw energy landscape as colored background
+    draw_energy_background(ax, barrier_height=0.55, alpha=0.3, t_range=t_range)
+    
+    # Plot the trajectory
+    ax.plot(t, x, color=ATLAS_COLORS['path_single'], lw=1.8, alpha=0.9, zorder=5)
     
     # Mark sensitivity chain - Jacobian Φ(T,t) propagates through history
-    events = [20, 50, 80, 100]
+    n = len(t)
+    events = [int(n*0.12), int(n*0.35), int(n*0.55), int(n*0.80)]
     for ev in events:
-        ax.scatter(t[ev], x[ev], s=40, color=ATLAS_COLORS['arrow_bwd'], zorder=10)
+        ax.scatter(t[ev], x[ev], s=50, color=ATLAS_COLORS['arrow_bwd'], 
+                  edgecolor='white', linewidth=1, zorder=10)
     for i in range(len(events) - 1):
         ax.annotate('', xy=(t[events[i+1]], x[events[i+1]]),
                     xytext=(t[events[i]], x[events[i]]),
                     arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['sensitivity'],
-                                   lw=1.2, ls='--', connectionstyle='arc3,rad=0.15'))
+                                   lw=1.5, ls='--', connectionstyle='arc3,rad=0.15'))
     
     ax.set_title('PATH', fontsize=11, fontweight='bold', color=ATLAS_COLORS['path_single'], pad=4)
-    # Show the pathwise formula
     ax.text(0.5, 0.02, '"remembers"', transform=ax.transAxes, ha='center', fontsize=9,
             style='italic', color=ATLAS_COLORS['annotation'])
+    ax.set_xlim(t[0], t[-1])
+    ax.set_ylim(-1.1, 1.1)
     clean_axis(ax)
 
 
 def plot_ensemble(ax):
-    """Ensemble - forgets history. Score function/REINFORCE gradient.
+    """Ensemble - forgets history. Uses equilibrium distribution only."""
+    # Get reference trajectory for time axis
+    t_ref, _ = get_exemplar_trajectory()
     
-    REINFORCE: E[O · ∇_θ log p(τ)] - score function estimator
-    Variance ~ T (Itô isometry) - much better than exp(2λT)!
+    # Generate ensemble of trajectories in BATCH
+    n_paths = 8
+    dt = 0.012
+    x0_values = torch.tensor([-0.75 if i % 2 == 0 else 0.75 for i in range(n_paths)], device=DEVICE)
+    od = OverdampedLangevin(gamma=1.0, kT=0.15).to(DEVICE)
+    x_batch = run_sim(od, x0_values, len(t_ref)-1, dt)
+    t = np.linspace(0, (len(t_ref)-1)*dt, len(t_ref))
+    t_end = t[-1]
     
-    KEY: Malliavin IBP shows PATH ↔ ENSEMBLE are equivalent:
-    E[∇_x O · ∂x_T/∂θ] = E[O · ∇_θ log p(τ)]
-    The Jacobian is "hidden" in the score!
-    """
-    n_paths = 20
+    # Plot all trajectories
     for i in range(n_paths):
-        t, x = generate_sde_trajectory(seed=100 + i, n_steps=120, noise_scale=0.35)
-        weight = np.exp(-0.3 * x[-1]**2)
-        color = plt.cm.Blues(0.3 + 0.5 * weight)
-        ax.plot(t, x, color=color, alpha=0.3 + 0.4 * weight, lw=1)
+        x = x_batch[:, i]
+        color = plt.cm.Blues(0.3 + 0.4 * (x[-1] + 1) / 2)
+        ax.plot(t, x, color=color, alpha=0.25, lw=0.8, zorder=2)
     
-    # Equilibrium distribution - the ONLY thing that matters for ensemble view
-    y_range = np.linspace(-2, 2, 80)
-    eq_dist = np.exp(-0.5 * y_range**2)
-    eq_dist = eq_dist / eq_dist.max() * 0.8
-    ax.fill_betweenx(y_range, t[-1], t[-1] + eq_dist, color=ATLAS_COLORS['equilibrium'], alpha=0.4)
-    ax.plot(t[-1] + eq_dist, y_range, color=ATLAS_COLORS['equilibrium'], lw=1.5)
-    ax.text(t[-1] + 0.5, 0, '$\\pi$', fontsize=10, color=ATLAS_COLORS['equilibrium'], fontweight='bold')
+    # Equilibrium distribution - bimodal for double-well
+    y_dist = np.linspace(-1.05, 1.05, 100)
+    eq_dist = 0.5 * np.exp(-8 * (y_dist - 0.7)**2) + 0.5 * np.exp(-8 * (y_dist + 0.7)**2)
+    eq_dist = eq_dist / eq_dist.max() * 0.7
+    
+    # Draw distribution at the end
+    ax.fill_betweenx(y_dist, t_end, t_end + eq_dist, color=ATLAS_COLORS['equilibrium'], alpha=0.5, zorder=3)
+    ax.plot(t_end + eq_dist, y_dist, color=ATLAS_COLORS['equilibrium'], lw=1.8, zorder=4)
+    ax.text(t_end + 0.45, 0, '$\\pi$', fontsize=10, color=ATLAS_COLORS['equilibrium'], fontweight='bold')
+    
+    t_range = (t[0], t_end + 0.85)
+    draw_energy_background(ax, barrier_height=0.5, alpha=0.3, t_range=t_range)
     
     ax.set_title('ENSEMBLE', fontsize=11, fontweight='bold', color=ATLAS_COLORS['ensemble_base'], pad=4)
-    # Emphasize this is space average over distribution (history forgotten)
     ax.text(0.5, 0.02, '"forgets"', transform=ax.transAxes, ha='center', fontsize=9,
             style='italic', color=ATLAS_COLORS['annotation'])
-    ax.set_xlim(t[0] - 0.3, t[-1] + 1.5)
+    ax.set_xlim(t_range[0], t_range[1])
+    ax.set_ylim(-1.1, 1.1)
     clean_axis(ax)
 
 
@@ -170,36 +278,108 @@ def plot_ensemble(ax):
 # =============================================================================
 
 def plot_forward(ax):
-    """Forward sensitivity propagation."""
-    t, x = generate_sde_trajectory(seed=42, n_steps=120)
-    ax.plot(t, x, color=ATLAS_COLORS['path_single'], lw=1.8, alpha=0.7)
+    """Forward sensitivity propagation - SDE forward integration.
     
-    # Forward arrows only (no uncertainty tube)
-    for idx in [20, 45, 70, 95]:
-        draw_flow_arrow(ax, t, x, idx, 'forward', ATLAS_COLORS['arrow_fwd'])
+    Visual: Particle in double-well with forward-pointing arrows BETWEEN adjacent
+    checkpoints showing the forward SDE integration flow from t=0 to t=T.
+    """
+    # Get the exemplar trajectory (shared across panels)
+    t, x = get_exemplar_trajectory()
+    t_range = (t[0], t[-1])
+    
+    # Draw energy landscape as colored background
+    draw_energy_background(ax, barrier_height=0.55, alpha=0.3, t_range=t_range)
+    
+    # Plot the trajectory
+    ax.plot(t, x, color=ATLAS_COLORS['path_single'], lw=1.8, alpha=0.7, zorder=5)
+    
+    # =====================================================================
+    # KEY: Forward arrows BETWEEN adjacent checkpoints (SDE integration flow)
+    # Shows x_{t} → x_{t+1} forward propagation
+    # =====================================================================
+    n = len(t)
+    checkpoint_indices = [int(n*0.10), int(n*0.30), int(n*0.50), int(n*0.70), int(n*0.90)]
+    
+    # Mark all checkpoints
+    for idx in checkpoint_indices:
+        ax.scatter(t[idx], x[idx], s=40, color=ATLAS_COLORS['arrow_fwd'], 
+                  edgecolor='white', linewidth=1, zorder=10)
+    
+    # Draw forward arrows BETWEEN adjacent checkpoints
+    for i in range(len(checkpoint_indices) - 1):
+        idx_from = checkpoint_indices[i]
+        idx_to = checkpoint_indices[i + 1]
+        
+        # Arrow from checkpoint i to checkpoint i+1 (forward flow)
+        ax.annotate('', xy=(t[idx_to], x[idx_to]), xytext=(t[idx_from], x[idx_from]),
+                    arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['arrow_fwd'], 
+                                   lw=1.8, alpha=0.8, mutation_scale=12,
+                                   connectionstyle='arc3,rad=0.1'))
+    
+    # Add labels for first and last checkpoints
+    ax.text(t[checkpoint_indices[0]], x[checkpoint_indices[0]] - 0.18, '$x_0$', 
+            fontsize=8, ha='center', color=ATLAS_COLORS['arrow_fwd'], fontweight='bold')
+    ax.text(t[checkpoint_indices[-1]], x[checkpoint_indices[-1]] + 0.18, '$x_T$', 
+            fontsize=8, ha='center', color=ATLAS_COLORS['arrow_fwd'], fontweight='bold')
     
     ax.set_title('FORWARD', fontsize=11, fontweight='bold', color=ATLAS_COLORS['arrow_fwd'], pad=4)
-    ax.text(0.5, 0.02, '$0 \\to T$', transform=ax.transAxes, ha='center', fontsize=9,
+    ax.text(0.5, 0.02, '$x_t \\to x_{t+1}$ (SDE)', transform=ax.transAxes, ha='center', fontsize=9,
             color=ATLAS_COLORS['arrow_fwd'])
+    ax.set_xlim(t_range[0], t_range[1])
+    ax.set_ylim(-1.1, 1.1)
     clean_axis(ax)
 
 
 def plot_backward(ax):
-    """Backward adjoint flow."""
-    t, x = generate_sde_trajectory(seed=42, n_steps=120)
-    ax.plot(t, x, color=ATLAS_COLORS['path_single'], lw=1.8, alpha=0.7)
+    """Backward adjoint flow - Jacobian propagation.
     
-    # Loss marker
-    ax.scatter(t[-1], x[-1], s=80, color=ATLAS_COLORS['arrow_bwd'], zorder=10, marker='*')
-    ax.text(t[-1] + 0.2, x[-1], '$\\mathcal{L}$', fontsize=9, color=ATLAS_COLORS['arrow_bwd'])
+    Visual: Particle in double-well with REVERSE arrows BETWEEN adjacent checkpoints
+    showing Jacobian backpropagation from T to 0.
+    """
+    # Get the exemplar trajectory (shared across panels)
+    t, x = get_exemplar_trajectory()
+    t_range = (t[0], t[-1])
     
-    # Backward arrows
-    for idx in [95, 65, 35]:
-        draw_flow_arrow(ax, t, x, idx, 'backward', ATLAS_COLORS['arrow_bwd'])
+    # Draw energy landscape as colored background
+    draw_energy_background(ax, barrier_height=0.55, alpha=0.3, t_range=t_range)
+    
+    # Plot the trajectory
+    ax.plot(t, x, color=ATLAS_COLORS['path_single'], lw=1.8, alpha=0.7, zorder=5)
+    
+    # =====================================================================
+    # KEY: Reverse arrows BETWEEN adjacent checkpoints (Jacobian backprop)
+    # Shows ∂L/∂x_{t} ← ∂L/∂x_{t+1} backward propagation
+    # =====================================================================
+    n = len(t)
+    checkpoint_indices = [int(n*0.10), int(n*0.30), int(n*0.50), int(n*0.70), int(n*0.90)]
+    
+    # Mark all checkpoints
+    for idx in checkpoint_indices:
+        ax.scatter(t[idx], x[idx], s=40, color=ATLAS_COLORS['arrow_bwd'], 
+                  edgecolor='white', linewidth=1, zorder=10)
+    
+    # Draw REVERSE arrows BETWEEN adjacent checkpoints (backward Jacobian flow)
+    for i in range(len(checkpoint_indices) - 1, 0, -1):
+        idx_from = checkpoint_indices[i]      # Later time (gradient source)
+        idx_to = checkpoint_indices[i - 1]    # Earlier time (gradient target)
+        
+        # Arrow from checkpoint i to checkpoint i-1 (backward Jacobian flow)
+        ax.annotate('', xy=(t[idx_to], x[idx_to]), xytext=(t[idx_from], x[idx_from]),
+                    arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['arrow_bwd'], 
+                                   lw=1.8, alpha=0.8, mutation_scale=12,
+                                   connectionstyle='arc3,rad=-0.1'))
+    
+    # Add labels for first and last checkpoints
+    ax.text(t[checkpoint_indices[-1]], x[checkpoint_indices[-1]] + 0.18, '$\\nabla_{x_T}\\mathcal{L}$', 
+            fontsize=7, ha='center', color=ATLAS_COLORS['arrow_bwd'], fontweight='bold')
+    ax.text(t[checkpoint_indices[0]], x[checkpoint_indices[0]] - 0.18, '$\\nabla_{x_0}\\mathcal{L}$', 
+            fontsize=7, ha='center', color=ATLAS_COLORS['arrow_bwd'], fontweight='bold')
     
     ax.set_title('BACKWARD', fontsize=11, fontweight='bold', color=ATLAS_COLORS['arrow_bwd'], pad=4)
-    ax.text(0.5, 0.02, '$T \\to 0$', transform=ax.transAxes, ha='center', fontsize=9,
+    ax.text(0.5, 0.02, '$\\nabla_{x_t} \\leftarrow \\nabla_{x_{t+1}}$ (Jacobian)', transform=ax.transAxes, ha='center', fontsize=8,
             color=ATLAS_COLORS['arrow_bwd'])
+    ax.set_xlim(t_range[0], t_range[1])
+    ax.set_ylim(-1.1, 1.1)
     clean_axis(ax)
 
 
@@ -208,347 +388,400 @@ def plot_backward(ax):
 # =============================================================================
 
 def plot_sde(ax):
-    """SDE with external noise."""
-    t, x = generate_sde_trajectory(seed=42, n_steps=120, noise_scale=0.4)
-    ax.plot(t, x, color=ATLAS_COLORS['path_single'], lw=1.8, alpha=0.8)
+    """SDE with external noise.
     
-    # Noise kicks
-    np.random.seed(42)
-    noise_pts = np.random.choice(range(15, 105), size=8, replace=False)
+    Visual: Particle in double-well with random noise kicks (dW_t) shown as
+    arrows indicating stochastic perturbations.
+    """
+    # Get the exemplar trajectory (shared across panels)
+    t, x = get_exemplar_trajectory()
+    t_range = (t[0], t[-1])
+    
+    # Draw energy landscape as colored background
+    draw_energy_background(ax, barrier_height=0.55, alpha=0.3, t_range=t_range)
+    
+    # Plot the trajectory
+    ax.plot(t, x, color=ATLAS_COLORS['path_single'], lw=1.8, alpha=0.8, zorder=5)
+    
+    # Noise kicks - random perturbations shown as arrows
+    np.random.seed(55)
+    n = len(t)
+    noise_pts = np.random.choice(range(int(n*0.1), int(n*0.85)), size=12, replace=False)
     for pt in noise_pts:
-        noise_mag = np.random.randn() * 0.25
+        noise_mag = np.random.randn() * 0.18
         ax.annotate('', xy=(t[pt], x[pt] + noise_mag),
                     xytext=(t[pt], x[pt]),
-                    arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['noise'], lw=1.2, alpha=0.6))
+                    arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['noise'], 
+                                   lw=1.3, alpha=0.7))
     
     ax.set_title('SDE', fontsize=11, fontweight='bold', color=ATLAS_COLORS['noise'], pad=4)
     ax.text(0.5, 0.02, '$dW_t$ noise', transform=ax.transAxes, ha='center', fontsize=9,
             color=ATLAS_COLORS['noise'])
+    ax.set_xlim(t[0], t[-1])
+    ax.set_ylim(-1.1, 1.1)
     clean_axis(ax)
 
 
 def plot_ode(ax):
-    """ODE with deterministic thermostat."""
-    t, x, xi = generate_ode_trajectory(seed=42, n_steps=120)
-    ax.plot(t, x, color=ATLAS_COLORS['path_single'], lw=1.8, alpha=0.8)
-    ax.plot(t, xi * 0.4, color=ATLAS_COLORS['thermostat'], lw=1.2, alpha=0.5, ls='--')
+    """ODE with deterministic thermostat.
     
-    # Coupling indicators
-    for pt in [30, 60, 90]:
-        ax.plot([t[pt], t[pt]], [x[pt], xi[pt] * 0.4], 
-               color=ATLAS_COLORS['thermostat'], ls=':', lw=1, alpha=0.5)
+    Visual: Particle in double-well with Nosé-Hoover thermostat variable ξ
+    shown as a coupled oscillator controlling the dynamics.
+    Uses a long pre-equilibrated simulation to show proper barrier crossing.
+    """
+    # Get the exemplar ODE trajectory (pre-equilibrated)
+    t, x, xi = get_exemplar_ode_trajectory()
+    t_range = (t[0], t[-1])
+    
+    # Draw energy landscape as colored background
+    draw_energy_background(ax, barrier_height=0.55, alpha=0.3, t_range=t_range)
+    
+    # Plot the trajectory
+    ax.plot(t, x, color=ATLAS_COLORS['path_single'], lw=1.2, alpha=0.85, zorder=5)
+    
+    # Thermostat variable ξ (scaled to fit in plot)
+    xi_scaled = xi * 0.12
+    ax.plot(t, xi_scaled, color=ATLAS_COLORS['thermostat'], lw=0.9, alpha=0.5, ls='--', zorder=4)
+    
+    # Coupling indicators between x and ξ at a few points
+    n = len(t)
+    for pt in [int(n*0.2), int(n*0.5), int(n*0.8)]:
+        if pt < len(t):
+            ax.plot([t[pt], t[pt]], [x[pt], xi_scaled[pt]], 
+                   color=ATLAS_COLORS['thermostat'], ls=':', lw=1.2, alpha=0.5)
     
     ax.set_title('ODE', fontsize=11, fontweight='bold', color=ATLAS_COLORS['thermostat'], pad=4)
     ax.text(0.5, 0.02, '$\\xi$ thermostat', transform=ax.transAxes, ha='center', fontsize=9,
             color=ATLAS_COLORS['thermostat'])
+    ax.set_xlim(t[0], t[-1])
+    ax.set_ylim(-1.1, 1.1)
     clean_axis(ax)
 
 
 # =============================================================================
-# Row 4: REINFORCE vs GIRSANOV
+# Row 4: BPTT (Backprop) vs LIKELIHOOD RATIO (Path Score)
 # =============================================================================
 
-def plot_reinforce(ax):
-    """REINFORCE - Trajectories → Final samples → O · ∇_θU → Gradient.
+def plot_bptt(ax):
+    """BPTT (Backpropagation Through Time) - Jacobian chain propagation.
     
-    Key insight: For equilibrium observables, the gradient is:
-        ∇_θ ⟨O⟩ = -β Cov(O, ∇_θU) = -β ⟨(O - ⟨O⟩) · ∇_θU⟩
+    Pathwise gradient: ∂x_T/∂θ = Φ(T,0) = Π_t ∂f/∂x where Φ is the Jacobian matrix.
+    The sensitivity grows exponentially: ||Φ|| ~ exp(λT) where λ is Lyapunov exponent.
     
-    Trajectory endpoints become samples. Each sample contributes:
-        O(xᵢ) · (-β ∇_θU(xᵢ))
+    Visual: Show trajectory with Jacobian vectors growing along the path,
+    illustrating the exponential growth that causes instability in chaotic systems.
+    Shows the chain rule accumulation: Φ(T,0) = Φ(T,t_n) · Φ(t_n,t_{n-1}) · ... · Φ(t_1,0)
     """
-    np.random.seed(200)
+    # Get the exemplar trajectory (shared across panels)
+    t, x = get_exemplar_trajectory()
+    t_range = (t[0], t[-1])
     
-    # =========================================================================
-    # Background: Show the observable O(x) as a hint
-    # =========================================================================
-    y_range_full = np.linspace(-1.8, 1.8, 100)
-    # Observable O(x) = x (simple linear observable for schematic)
-    # Let's show it as a subtle gradient or color bar
-    ax.fill_between([0, 2.5], -1.8, 1.8, color=ATLAS_COLORS['fill'], alpha=0.15, zorder=0)
+    # Draw energy landscape as colored background
+    draw_energy_background(ax, barrier_height=0.55, alpha=0.3, t_range=t_range)
     
-    # =========================================================================
-    # Generate trajectories and collect endpoints as samples
-    # =========================================================================
+    # Plot the trajectory
+    ax.plot(t, x, color=ATLAS_COLORS['path_single'], lw=1.8, alpha=0.7, zorder=5)
+    
+    # Show Jacobian vectors GROWING along the path (exponential growth)
+    # These represent ∂x_t/∂θ - the sensitivity to parameter changes
+    n = len(t)
+    jacobian_pts = [int(n*0.12), int(n*0.30), int(n*0.48), int(n*0.65), int(n*0.82)]
+    base_size = 0.06
+    
+    for i, pt in enumerate(jacobian_pts):
+        # Jacobian grows exponentially: size ~ exp(λt)
+        growth_factor = np.exp(0.45 * i)  # Simulated exponential growth
+        vec_size = base_size * growth_factor
+        
+        # Tangent direction (approximate)
+        if pt < len(t) - 5:
+            tangent_x = t[pt+5] - t[pt]
+            tangent_y = x[pt+5] - x[pt]
+            norm = np.sqrt(tangent_x**2 + tangent_y**2) + 1e-6
+            # Perpendicular direction
+            perp_x = -tangent_y / norm * vec_size * 0.3
+            perp_y = tangent_x / norm * vec_size * 0.8
+        else:
+            perp_x, perp_y = 0, vec_size * 0.8
+        
+        # Draw growing Jacobian vector
+        ax.annotate('', xy=(t[pt] + perp_x, x[pt] + perp_y),
+                    xytext=(t[pt], x[pt]),
+                    arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['jacobian'], 
+                                   lw=1.5 + 0.4*i, alpha=0.8, mutation_scale=8+i*2))
+        
+        # Mark the point
+        ax.scatter(t[pt], x[pt], s=30 + 12*i, color=ATLAS_COLORS['jacobian'], 
+                  edgecolor='white', linewidth=0.8, zorder=10)
+    
+    # Label showing Jacobian chain rule
+    ax.text(t[jacobian_pts[-1]] - 0.15, x[jacobian_pts[-1]] + 0.35, 
+            '$\\Phi(T,0)$', fontsize=8, color=ATLAS_COLORS['jacobian'], fontweight='bold')
+    
+    # Formula annotation showing chain rule accumulation (positioned to match PATH LR)
+    ax.text(0.02, 0.82, '$\\Phi = \\prod_t \\frac{\\partial f}{\\partial x}$', 
+            transform=ax.transAxes, fontsize=7, color=ATLAS_COLORS['jacobian'],
+            bbox=dict(boxstyle='round,pad=0.1', facecolor='white', alpha=0.9, edgecolor='none'))
+    
+    ax.set_title('BPTT (Backprop)', fontsize=11, fontweight='bold', 
+                 color=ATLAS_COLORS['jacobian'], pad=4)
+    ax.text(0.5, 0.02, 'var $\\sim e^{2\\lambda T}$', 
+            transform=ax.transAxes, ha='center', fontsize=8, 
+            color=ATLAS_COLORS['jacobian'], style='italic')
+    ax.set_xlim(t[0], t[-1])
+    ax.set_ylim(-1.1, 1.1)
+    clean_axis(ax)
+
+
+def plot_likelihood_ratio(ax):
+    """Likelihood Ratio (Path Score) - score accumulation along trajectory.
+    
+    Path gradient: ∇_θ log p(τ|θ) = Σ_t δℓ_t where δℓ_t are local score increments.
+    Variance grows linearly: Var ~ T (much better than exp(2λT)!)
+    
+    δℓ_t = (1/σ²) ∇_θ b(x_t) · dW_t  (Girsanov-Cameron-Martin)
+    
+    Visual: Show trajectory with score increments accumulating ABOVE the trajectory,
+    building up to a final sum (path integral). This shows the "path sum" concept.
+    """
+    # Get the exemplar trajectory (shared across panels)
+    t, x = get_exemplar_trajectory()
+    t_range = (t[0], t[-1])
+    
+    # Draw energy landscape as colored background
+    draw_energy_background(ax, barrier_height=0.55, alpha=0.3, t_range=t_range)
+    
+    # Plot the trajectory
+    ax.plot(t, x, color=ATLAS_COLORS['path_single'], lw=1.8, alpha=0.7, zorder=5)
+    
+    # =====================================================================
+    # KEY: Path sum ABOVE trajectory - cumulative score accumulation
+    # Shows δℓ_t increments stacking up to form the total path score
+    # =====================================================================
+    n = len(t)
+    score_pts = [int(n*0.20), int(n*0.40), int(n*0.60), int(n*0.80)]
+    
+    # Baseline for the accumulated score (above trajectory, within visible range)
+    score_baseline = 0.35
+    cumulative_height = 0.0
+    increment_height = 0.12  # Each δℓ adds this much
+    
+    # Draw accumulating score bars ABOVE the trajectory
+    for i, pt in enumerate(score_pts):
+        # Draw connection from trajectory point to score accumulator
+        ax.plot([t[pt], t[pt]], [x[pt], score_baseline + cumulative_height], 
+               color=ATLAS_COLORS['lr_score'], ls=':', lw=0.8, alpha=0.4, zorder=6)
+        
+        # Mark the sample point on trajectory
+        ax.scatter(t[pt], x[pt], s=25, color=ATLAS_COLORS['lr_score'], 
+                  edgecolor='white', linewidth=0.5, zorder=10)
+        
+        # Draw the increment bar (stacking)
+        bar_width = 0.035
+        bar_left = t[pt] - bar_width/2
+        rect = patches.Rectangle((bar_left, score_baseline + cumulative_height), 
+                                  bar_width, increment_height,
+                                  facecolor=ATLAS_COLORS['lr_score'], 
+                                  edgecolor='white', linewidth=0.5,
+                                  alpha=0.7, zorder=8)
+        ax.add_patch(rect)
+        
+        cumulative_height += increment_height
+    
+    # Final accumulated sum marker (at the top of the stack)
+    final_score_y = score_baseline + cumulative_height
+    ax.scatter(t[score_pts[-1]], final_score_y + 0.03, s=50, 
+              color=ATLAS_COLORS['lr_score'], marker='s',
+              edgecolor='white', linewidth=1, zorder=15)
+    
+    # Labels (positioned within bounds)
+    ax.text(t[score_pts[0]] + 0.025, score_baseline + increment_height * 0.5, '$\\delta\\ell$', 
+            fontsize=7, color=ATLAS_COLORS['lr_score'], fontweight='bold', va='center')
+    ax.text(t[score_pts[-1]] + 0.025, final_score_y, '$\\sum\\delta\\ell$', 
+            fontsize=7, color=ATLAS_COLORS['lr_score'], fontweight='bold', va='center')
+    
+    # Formula annotation (positioned to match BPTT)
+    ax.text(0.02, 0.82, '$\\delta\\ell_t \\propto \\nabla_\\theta b \\cdot dW$', 
+            transform=ax.transAxes, fontsize=7, color=ATLAS_COLORS['lr_score'],
+            bbox=dict(boxstyle='round,pad=0.1', facecolor='white', alpha=0.9, edgecolor='none'))
+    
+    ax.set_title('PATH LR', fontsize=11, fontweight='bold', 
+                 color=ATLAS_COLORS['lr_score'], pad=4)
+    ax.text(0.5, 0.02, 'var $\\sim T$', 
+            transform=ax.transAxes, ha='center', fontsize=8, 
+            color=ATLAS_COLORS['lr_score'], style='italic')
+    ax.set_xlim(t_range[0], t_range[1])
+    ax.set_ylim(-1.1, 1.1)
+    clean_axis(ax)
+
+
+# =============================================================================
+# Row 5: DATA LIKELIHOOD vs OBSERVABLE MATCHING
+# =============================================================================
+
+def plot_data_likelihood(ax):
+    """Data Likelihood: Maximum Likelihood with Contrastive Divergence.
+    
+    Shows generated sample data at 4 different time slices to illustrate
+    ML training with contrastive divergence: matching data gradient by
+    comparing model samples vs data samples at each time point.
+    """
+    # Get reference trajectory for time axis
+    t_ref, _ = get_exemplar_trajectory()
+    
+    # Generate simulation trajectories (model samples) in BATCH
     n_traj = 6
-    n_steps = 60
-    t_max = 1.6
-    
-    endpoints = []
-    for i in range(n_traj):
-        t, x = generate_sde_trajectory(seed=200 + i, n_steps=n_steps, noise_scale=0.35)
-        t_scaled = t / t.max() * t_max
-        ax.plot(t_scaled, x, color=ATLAS_COLORS['reinforce'], alpha=0.18, lw=0.8)
-        endpoints.append(x[-1])
-    
-    endpoints = np.array(endpoints)
-    x_sample = t_max + 0.1
-    
-    # =========================================================================
-    # Mark trajectory endpoints and their contributions
-    # =========================================================================
-    for i, y in enumerate(endpoints):
-        # Sample point
-        ax.scatter(x_sample, y, s=50, color=ATLAS_COLORS['reinforce'], 
-                  edgecolor='white', linewidth=1.2, zorder=10)
-        
-        # O · ∇_θU arrow (the "score contribution")
-        # For x^2 observable and Gaussian p, score is proportional to x
-        arrow_len = y * 0.25
-        if abs(arrow_len) > 0.05:
-            ax.annotate('', xy=(x_sample + arrow_len, y), xytext=(x_sample, y),
-                       arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['reinforce'], 
-                                      lw=1.8, alpha=0.9, mutation_scale=9))
-    
-    # Label for samples
-    ax.text(x_sample, 1.6, '$x_i$', fontsize=8, ha='center',
-            color=ATLAS_COLORS['reinforce'], fontweight='bold')
-    
-    # =========================================================================
-    # RIGHT: Funneling to the aggregate gradient
-    # =========================================================================
-    x_funnel = x_sample + 0.5
-    x_grad = x_funnel + 0.35
-    
-    # Funnel lines
-    for y in endpoints:
-        arrow_len = y * 0.25
-        ax.plot([x_sample + arrow_len, x_funnel], [y, 0], 
-               color=ATLAS_COLORS['reinforce'], lw=0.6, alpha=0.15, ls='--')
-    
-    # Gradient aggregate arrow
-    ax.annotate('', xy=(x_grad + 0.3, 0), xytext=(x_funnel, 0),
-                arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['reinforce'], 
-                               lw=2.8, mutation_scale=12))
-    
-    # Labels
-    # ax.text(x_grad + 0.15, 0.25, '$\\nabla_\\theta\\langle O\\rangle$', fontsize=8,
-    #         color=ATLAS_COLORS['reinforce'], fontweight='bold', ha='center')
-    
-    ax.text(x_grad - 0.1, -0.6, '$-\\beta\\mathrm{Cov}(O, \\nabla_\\theta U)$', 
-            fontsize=7, ha='center', color=ATLAS_COLORS['reinforce'], style='italic')
-
-    ax.set_title('REINFORCE (Score)', fontsize=11, fontweight='bold', 
-                 color=ATLAS_COLORS['reinforce'], pad=4)
-    
-    ax.set_xlim(-0.1, x_grad + 0.6)
-    ax.set_ylim(-1.8, 1.8)
-    clean_axis(ax)
-
-
-def plot_girsanov(ax):
-    """Girsanov - Ensemble of paths with LOCAL accumulation of log p(τ).
-    
-    Key insight: For path-dependent observables O(τ), the gradient is:
-        ∇_θ ⟨O⟩ = ⟨O(τ) · ∇_θ log p(τ|θ)⟩
-    
-    where the path score is a PATH INTEGRAL that accumulates locally:
-        ∇_θ log p(τ) = (1/σ²) Σₜ ∇_θb(xₜ) · ΔWₜ
-    
-    Path thickness reflects accumulated weight. 
-    """
-    np.random.seed(42)
-    n_steps = 70
-    dt = 0.04
-    t = np.linspace(0, n_steps * dt, n_steps)
-    
-    # =========================================================================
-    # Generate ENSEMBLE of paths with tracked weight accumulation
-    # =========================================================================
-    n_paths = 8
-    paths = []
-    path_weights = []
-    
-    for p in range(n_paths):
-        x = np.zeros(n_steps)
-        log_weight = np.zeros(n_steps)
-        np.random.seed(300 + p)
-        cumulative = 0.0
-        for j in range(1, n_steps):
-            dW = np.random.randn()
-            drift = -0.15 * x[j-1]
-            x[j] = x[j-1] + drift * dt + 0.35 * np.sqrt(dt) * dW
-            
-            # Local accumulation: Δ log p ∝ drift_gradient · dW
-            # Using a simplified model where drift gradient is constant
-            local_contrib = 0.25 * dW 
-            cumulative += local_contrib
-            log_weight[j] = cumulative
-        
-        paths.append(x)
-        path_weights.append(log_weight)
-    
-    # =========================================================================
-    # Draw paths with THICKNESS proportional to accumulated weight
-    # =========================================================================
-    all_final_weights = [pw[-1] for pw in path_weights]
-    w_min, w_max = min(all_final_weights), max(all_final_weights)
-    w_range = w_max - w_min + 0.01
-    
-    for p, (x, log_w) in enumerate(zip(paths, path_weights)):
-        # Very distinct linewidth variation
-        w_norm = (log_w[-1] - w_min) / w_range
-        lw = 0.5 + 3.5 * (w_norm**1.5)  # non-linear for more contrast
-        alpha = 0.15 + 0.65 * w_norm
-        ax.plot(t, x, color=ATLAS_COLORS['girsanov'], lw=lw, alpha=alpha)
-        
-        # Observable marker at end
-        ax.scatter(t[-1], x[-1], s=25, color=ATLAS_COLORS['data'], 
-                  edgecolor='black', linewidth=0.8, zorder=15)
-
-    # =========================================================================
-    # Path Integral Detail: Show accumulation on ONE path
-    # =========================================================================
-    main_idx = np.argsort(all_final_weights)[-2] # pick a high-weight path
-    main_path = paths[main_idx]
-    
-    checkpoints = [10, 22, 34, 46, 58]
-    for cp in checkpoints:
-        x_c, y_c = t[cp], main_path[cp]
-        # "Score packet" - a small pulse showing local contribution
-        pulse_x = np.linspace(-0.06, 0.06, 10)
-        pulse_y = 0.12 * np.exp(-pulse_x**2 / 0.001)
-        ax.plot(x_c + pulse_x, y_c + pulse_y, color="black", lw=1.5, alpha=0.8)
-        
-    # Labels for accumulation
-    ax.text(t[checkpoints[1]], main_path[checkpoints[1]] + 0.3, '$\\delta \\ell_t$', 
-            fontsize=8, color=ATLAS_COLORS['noise'], ha='center')
-    
-    # Label for path integral formula
-    ax.text(t[-1], -1.3, '$\\langle O(\\tau) \\cdot \\int \\nabla_\\theta b \\cdot dW_t \\rangle$', 
-            fontsize=7.5, color=ATLAS_COLORS['girsanov'], ha='left', style='italic')
-    
-    ax.set_title('GIRSANOV (Reweight)', fontsize=11, fontweight='bold', 
-                 color=ATLAS_COLORS['girsanov'], pad=4)
-    
-    ax.set_xlim(-0.05, t[-1] + 0.8)
-    ax.set_ylim(-1.8, 1.8)
-    clean_axis(ax)
-
-
-# =============================================================================
-# Row 5: FINE vs COARSE (ML ↔ Observable Matching)
-# =============================================================================
-
-def plot_fine(ax):
-    """Fine-grained: Maximum Likelihood - simulation guided toward data configurations.
-    
-    Shows trajectories being "pulled" toward data points (target configurations).
-    The gradient is: E_data[∇U] - E_sim[∇U] (contrastive divergence).
-    """
-    np.random.seed(300)
-    
-    # Generate simulation trajectories
-    n_traj = 12
-    for i in range(n_traj):
-        t, x = generate_sde_trajectory(seed=300 + i, n_steps=100, noise_scale=0.32)
-        ax.plot(t, x, color=ATLAS_COLORS['fine'], alpha=0.2, lw=0.8)
-    
-    # Data points (target configurations) - shown at the END of trajectory space
-    # These are the x^data we want to maximize likelihood of
-    data_targets = np.array([-0.6, 0.1, 0.5, 0.9, 1.3])
-    t_end = 5.0  # end of trajectory
-    
-    for y_data in data_targets:
-        # Data point marker (yellow circle)
-        ax.scatter(t_end , y_data, s=25, color=ATLAS_COLORS['data'], 
-                  edgecolor='black', linewidth=1, zorder=10, marker='o')
-    
-    # Show model distribution p_θ at the end (where simulation lands)
-    y_range = np.linspace(-2, 2, 80)
-    # Current model distribution (slightly misaligned with data)
-    model_dist = np.exp(-0.5 * (y_range - 0.2)**2 / 0.7**2)
-    model_dist = model_dist / model_dist.max() * 0.6
-    ax.fill_betweenx(y_range, t_end, t_end + model_dist, 
-                     color=ATLAS_COLORS['fine'], alpha=0.3)
-    ax.plot(t_end  + model_dist, y_range, color=ATLAS_COLORS['fine'], lw=1.2, alpha=0.7)
-    
-    # # Arrows from model distribution toward data points (showing gradient direction)
-    # # This is the "contrastive" part: push probability toward data
-    # for y_data in data_targets[1:4]:  # show a few arrows
-    #     # Arrow from current model peak toward data
-    #     model_y = 0.2  # current model mean
-    #     if abs(y_data - model_y) > 0.2:
-    #         ax.annotate('', xy=(t_end - 0.3, y_data),
-    #                    xytext=(t_end - 0.3, model_y + 0.3 * np.sign(y_data - model_y)),
-    #                    arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['fine'], 
-    #                                   lw=1.3, alpha=0.7))
-    
-    # Labels
-    ax.text(t_end + 0.8, 1.0, '$p_\\theta$', fontsize=8, color=ATLAS_COLORS['fine'], fontweight='bold')
-    ax.text(t_end + 0.15, -1.5, '$x^{\\mathrm{data}}$', fontsize=8, color=ATLAS_COLORS['data'])
-    
-    ax.set_xlim(-0.3, t_end + 1.3)
-    ax.set_ylim(-2, 2)
-    ax.set_title('FINE (data likelihood)', fontsize=11, fontweight='bold', color=ATLAS_COLORS['fine'], pad=4)
-    ax.text(0.5, 0.02, '$-\\log p_\\theta(x^{\\mathrm{data}})$', 
-            transform=ax.transAxes, ha='center', fontsize=8, color=ATLAS_COLORS['fine'])
-    clean_axis(ax)
-
-
-def plot_coarse(ax):
-    """Coarse-grained: Observable matching - match average position ⟨x⟩.
-    
-    Shows matching a COARSE observable like mean position ⟨x⟩ rather than 
-    individual sample positions. Only care about the statistic, not the samples.
-    """
-    np.random.seed(400)
-    
-    # Generate ensemble
-    n_paths = 15
-    all_endpoints = []
-    
-    for i in range(n_paths):
-        t, x = generate_sde_trajectory(seed=400 + i, n_steps=80, noise_scale=0.35)
-        ax.plot(t, x, color=ATLAS_COLORS['coarse'], alpha=0.2, lw=0.8)
-        all_endpoints.append(x[-1])
-    
-    all_endpoints = np.array(all_endpoints)
-    
-    # =========================================================================
-    # Show the COARSE observable: average position ⟨x⟩
-    # =========================================================================
-    
-    # Current model mean
-    model_mean = np.mean(all_endpoints)
-    
-    # Target mean (what we want to match)
-    target_mean = 0.6
-    
+    dt = 0.012
+    x0_values = torch.tensor([-0.75 if i % 2 == 0 else 0.75 for i in range(n_traj)], device=DEVICE)
+    od = OverdampedLangevin(gamma=1.0, kT=0.15).to(DEVICE)
+    x_batch = run_sim(od, x0_values, len(t_ref)-1, dt)
+    t = np.linspace(0, (len(t_ref)-1)*dt, len(t_ref))
     t_end = t[-1]
     
-    # Horizontal lines showing ⟨x⟩_sim vs ⟨x⟩_target
-    ax.axhline(model_mean, xmin=0.7, xmax=0.95, color=ATLAS_COLORS['coarse'], 
-              lw=2.5, ls='-', alpha=0.9)
-    ax.axhline(target_mean, xmin=0.7, xmax=0.95, color=ATLAS_COLORS['data'], 
-              lw=2.5, ls='--', alpha=0.9)
+    # Draw energy background FIRST
+    t_range = (t_ref[0], t_end + 0.15)
+    draw_energy_background(ax, barrier_height=0.5, alpha=0.25, t_range=t_range)
     
-    # Vertical arrow showing the gap to minimize
-    arrow_x = t_end * 0.85
-    ax.annotate('', xy=(arrow_x, target_mean), xytext=(arrow_x, model_mean),
-               arrowprops=dict(arrowstyle='<->', color=ATLAS_COLORS['annotation'], 
-                              lw=1.8, mutation_scale=10))
+    # Plot model trajectories (lighter, in background)
+    for i in range(n_traj):
+        ax.plot(t, x_batch[:, i], color=ATLAS_COLORS['fine'], alpha=0.35, lw=0.8, zorder=3)
     
-    # Labels
-    ax.text(t_end + 0.15, model_mean, '$\\langle x \\rangle$', fontsize=8, 
-           color=ATLAS_COLORS['coarse'], va='center', fontweight='bold')
-    ax.text(t_end + 0.15, target_mean, '$x^*$', fontsize=8, 
-           color=ATLAS_COLORS['data'], va='center', fontweight='bold')
+    # =====================================================================
+    # KEY: 4 TIME SLICES with generated data samples
+    # Shows contrastive divergence: model samples ↔ data samples
+    # Gradient = E_data[∇U] - E_model[∇U] (pushes model toward data)
+    # =====================================================================
+    time_slices = [0.15, 0.40, 0.65, 0.90]  # 4 time slices
     
-    # Scatter endpoints to show the distribution (but we only care about mean!)
-    for ep in all_endpoints:
-        ax.scatter(t_end + 0.05, ep, s=18, color=ATLAS_COLORS['coarse'], 
-                  edgecolor='white', linewidth=0.4, alpha=0.5, zorder=5)
+    # Generate "data" samples at each time slice (slightly different from model)
+    # In practice, these would come from real data
+    np.random.seed(123)
+    data_per_slice = [
+        np.array([-0.65, -0.55, 0.50]),       # t1: data near left well + one right
+        np.array([-0.45, 0.35, 0.60]),        # t2: spreading toward both wells
+        np.array([-0.70, 0.25, 0.55, 0.70]),  # t3: more in right well
+        np.array([-0.60, 0.50, 0.65]),        # t4: equilibrium-like
+    ]
     
-    # Emphasize: we only care about the MEAN, not individual samples
-    ax.text(t_end * 0.5, 1.45, 'only $\\langle x \\rangle$ matters', fontsize=6,
-           color=ATLAS_COLORS['gray'], ha='center', style='italic', alpha=0.7)
+    for slice_idx, (frac, data_samples) in enumerate(zip(time_slices, data_per_slice)):
+        t_idx = int(frac * (len(t) - 1))
+        t_slice = t[t_idx]
+        
+        # Draw vertical time slice indicator
+        ax.axvline(x=t_slice, color=ATLAS_COLORS['data'], alpha=0.3, ls='--', lw=1.0, zorder=1)
+        
+        # Get model samples at this time slice
+        model_samples = x_batch[t_idx, :]
+        
+        # Draw DATA samples (filled circles with black edge) - target distribution
+        for y_data in data_samples:
+            ax.scatter(t_slice, y_data, s=40, color=ATLAS_COLORS['data'], 
+                      edgecolor='black', linewidth=0.8, zorder=12, marker='o')
+        
+        # # Draw MODEL samples (hollow circles) - what we're training
+        # for y_model in model_samples:
+        #     ax.scatter(t_slice, y_model, s=35, facecolor='white',
+        #               edgecolor=ATLAS_COLORS['fine'], linewidth=1.2, zorder=11, marker='o')
+        
+        # Draw contrastive arrows: model → data (gradient direction)
+        # Show a few representative arrows indicating the "push" direction
+        # for y_data in data_samples[:2]:  # Just show a couple arrows per slice
+        #     # Find closest model sample
+        #     dists = np.abs(model_samples - y_data)
+        #     closest_idx = np.argmin(dists)
+        #     y_model = model_samples[closest_idx]
+            
+        #     # Arrow from model to data (gradient pushes model toward data)
+        #     ax.annotate('', xy=(t_slice + 0.008, y_data), 
+        #                xytext=(t_slice - 0.008, y_model),
+        #                arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['fine'], 
+        #                               lw=1.2, alpha=0.6, mutation_scale=8))
     
-    ax.set_title('COARSE (Obs)', fontsize=11, fontweight='bold', color=ATLAS_COLORS['coarse'], pad=4)
-    ax.text(0.5, 0.02, '$(\\langle x \\rangle - x^*)^2$', 
+    # Time slice labels
+    for i, frac in enumerate(time_slices):
+        t_idx = int(frac * (len(t) - 1))
+        ax.text(t[t_idx], 1.0, f'$t_{i+1}$', fontsize=7, ha='center', 
+               color=ATLAS_COLORS['data'], fontweight='bold')
+    
+    # Legend-like annotation (within plot bounds)
+    ax.scatter([], [], s=35, color=ATLAS_COLORS['data'], edgecolor='black', 
+              linewidth=0.8, marker='o', label='data')
+    ax.scatter([], [], s=35, facecolor='white', edgecolor=ATLAS_COLORS['fine'], 
+              linewidth=1.2, marker='o', label='model')
+    # ax.text(0.02, 0.82, '● data  ○ model', fontsize=6.5, transform=ax.transAxes,
+    #        color=ATLAS_COLORS['annotation'], 
+    #        bbox=dict(boxstyle='round,pad=0.1', facecolor='white', alpha=0.9, edgecolor='none'))
+    
+    ax.set_xlim(t_range[0], t_range[1])
+    ax.set_ylim(-1.1, 1.1)
+    ax.set_title('DATA LIKELIHOOD', fontsize=11, fontweight='bold', color=ATLAS_COLORS['fine'], pad=4)
+    ax.text(0.5, 0.02, '$\\nabla_\\theta = \\mathbb{E}_{\\mathrm{data}}[\\nabla U] - \\mathbb{E}_{\\mathrm{model}}[\\nabla U]$', 
+            transform=ax.transAxes, ha='center', fontsize=7, color=ATLAS_COLORS['fine'])
+    clean_axis(ax)
+
+
+def plot_observable(ax):
+    """Observable Matching: Match a coarse observable like ⟨x⟩.
+    
+    Shows the AVERAGE POSITION as a function of time plotted ABOVE the trajectories.
+    This illustrates what the observable loss actually tracks - the ensemble mean.
+    """
+    # Get reference trajectory for time axis
+    t_ref, _ = get_exemplar_trajectory()
+    t_range = (t_ref[0], t_ref[-1])
+    
+    # Draw energy landscape as colored background
+    draw_energy_background(ax, barrier_height=0.5, alpha=0.3, t_range=t_range)
+    
+    # Generate ensemble in BATCH
+    n_paths = 15
+    dt = 0.012
+    # Start all from one side to show relaxation of mean
+    x0_values = torch.tensor([-0.8 for _ in range(n_paths)], device=DEVICE)
+    od = OverdampedLangevin(gamma=1.0, kT=0.15).to(DEVICE)
+    x_batch = run_sim(od, x0_values, len(t_ref)-1, dt)
+    t = np.linspace(0, 1, len(t_ref))
+    t_end = t[-1]
+    
+    # Plot all trajectories (more visible)
+    for i in range(n_paths):
+        ax.plot(t, x_batch[:, i], color=ATLAS_COLORS['coarse'], alpha=0.25, lw=0.7, zorder=2)
+    
+    # =====================================================================
+    # KEY: Plot the OBSERVABLE ⟨x⟩_t as a function of time ABOVE trajectories
+    # =====================================================================
+    mean_traj = np.mean(x_batch, axis=1)
+    
+    # Offset the mean trajectory above to make it visually distinct (within bounds)
+    y_offset = 0.50  # Shift upward but stay within ylim
+    mean_traj_shifted = mean_traj + y_offset
+    
+    # Plot the observable curve (thick, prominent)
+    ax.plot(t, mean_traj_shifted, color=ATLAS_COLORS['coarse'], lw=2.5, zorder=10, alpha=0.95)
+    ax.fill_between(t, y_offset - 0.05, mean_traj_shifted, color=ATLAS_COLORS['coarse'], alpha=0.15, zorder=9)
+    
+    # Label the observable (positioned within plot bounds)
+    mid_idx = len(t) // 3
+    ax.text(t[mid_idx], mean_traj_shifted[mid_idx] + 0.15, '$\\langle x \\rangle_t$', 
+            fontsize=9, color=ATLAS_COLORS['coarse'], fontweight='bold', ha='center', zorder=15)
+    
+    # # Show target observable (dashed line)
+    # target_mean = 0.0  # Equilibrium mean should be ~0 for symmetric double-well
+    # ax.axhline(y=target_mean + y_offset, color=ATLAS_COLORS['data'], ls='--', lw=2, alpha=0.8, zorder=8)
+    # ax.text(t_end * 0.5, target_mean + y_offset + 0.12, '$\\langle x \\rangle^*$', 
+    #         fontsize=8, color=ATLAS_COLORS['data'], fontweight='bold', va='bottom', ha='center')
+    
+    # Show loss as gap between model and target at end
+    # ax.annotate('', xy=(t_end * 0.95, target_mean + y_offset), 
+    #            xytext=(t_end * 0.95, mean_traj_shifted[-1]),
+    #            arrowprops=dict(arrowstyle='<->', color=ATLAS_COLORS['annotation'], 
+    #                          lw=1.5, mutation_scale=8), zorder=11)
+    
+    ax.set_title('OBSERVABLE', fontsize=11, fontweight='bold', color=ATLAS_COLORS['coarse'], pad=4)
+    ax.text(0.5, 0.02, '$(\\langle x \\rangle_T - \\langle x \\rangle^*)^2$', 
             transform=ax.transAxes, ha='center', fontsize=8, color=ATLAS_COLORS['coarse'])
-    ax.set_xlim(t[0] - 0.2, t_end + 0.7)
-    ax.set_ylim(-1.8, 1.8)
+    ax.set_xlim(t_range[0], t_range[1])
+    ax.set_ylim(-1.1, 1.1)
     clean_axis(ax)
 
 
@@ -564,13 +797,13 @@ def main():
     gs = fig.add_gridspec(2, 5, hspace=0.25, wspace=0.12,
                           left=0.03, right=0.98, top=0.82, bottom=0.08)
     
-    # Column labels (updated IV to clarify the distinction)
+    # Column labels
     col_info = [
         ('I', 'Path vs Ensemble'),
         ('II', 'Forward vs Backward'),
         ('III', 'SDE vs ODE'),
-        ('IV', 'Eq. Score vs Path Reweight'),
-        ('V', 'Fine vs Coarse'),
+        ('IV', 'BPTT vs Likelihood Ratio'),
+        ('V', 'Data Likelihood vs Observable'),
     ]
     
     # Plot panels - top row (first of each pair), bottom row (second of each pair)
@@ -589,15 +822,17 @@ def main():
     plot_sde(ax_sde)
     plot_ode(ax_ode)
     
-    ax_reinforce = fig.add_subplot(gs[0, 3])
-    ax_girsanov = fig.add_subplot(gs[1, 3])
-    plot_reinforce(ax_reinforce)
-    plot_girsanov(ax_girsanov)
+    # Column IV: BPTT vs Likelihood Ratio
+    ax_bptt = fig.add_subplot(gs[0, 3])
+    ax_lr = fig.add_subplot(gs[1, 3])
+    plot_bptt(ax_bptt)
+    plot_likelihood_ratio(ax_lr)
     
-    ax_fine = fig.add_subplot(gs[0, 4])
-    ax_coarse = fig.add_subplot(gs[1, 4])
-    plot_fine(ax_fine)
-    plot_coarse(ax_coarse)
+    # Column V: Data Likelihood vs Observable
+    ax_data_likelihood = fig.add_subplot(gs[0, 4])
+    ax_observable = fig.add_subplot(gs[1, 4])
+    plot_data_likelihood(ax_data_likelihood)
+    plot_observable(ax_observable)
     
     # Column labels on top
     for i, (num, label) in enumerate(col_info):
@@ -630,7 +865,7 @@ def main():
     # Large equivalence symbol with "Malliavin IBP" label
     fig.text(x_ibp - 0.05, 0.47, '≡', fontsize=14, ha='center', va='center', 
              color=ibp_color, fontweight='bold')
-    fig.text(x_ibp + 0.05, 0.47, 'Malliavin\n   IBP', fontsize=6, ha='left', va='center', 
+    fig.text(x_ibp + 0.05, 0.47, 'Malliavin\n   IBP', fontsize=8, ha='left', va='center', 
              color=ibp_color, fontweight='bold', linespacing=0.9)
     
     # Bottom formula (ENSEMBLE): E[O · ∇_θ log p(τ)] - the score/REINFORCE gradient
@@ -643,10 +878,10 @@ def main():
     # PATH has exponential variance (Lyapunov), ENSEMBLE has linear variance (Itô)
     # Position these to the right of the formulas, not overlapping
     fig.text(x_ibp + 0.065, 0.545, 'var $\\sim e^{2\\lambda T}$', 
-             fontsize=6.5, ha='left', va='center', color=ATLAS_COLORS['arrow_bwd'], 
+             fontsize=8.5, ha='left', va='center', color=ATLAS_COLORS['arrow_bwd'], 
              style='italic')
     fig.text(x_ibp + 0.065, 0.395, 'var $\\sim T$', 
-             fontsize=6.5, ha='left', va='center', color=ATLAS_COLORS['equilibrium'], 
+             fontsize=8.5, ha='left', va='center', color=ATLAS_COLORS['equilibrium'], 
              style='italic')
     
     # Main title
