@@ -621,7 +621,7 @@ class GirsanovEstimator(nn.Module):
         self,
         trajectories: torch.Tensor,
         observable: Observable,
-        dt: float,
+        dt: Union[float, torch.Tensor],
         return_diagnostics: bool = False,
     ) -> Union[dict[str, torch.Tensor], Tuple[dict[str, torch.Tensor], dict]]:
         """Estimate gradient using Girsanov reweighting with variance reduction.
@@ -635,7 +635,7 @@ class GirsanovEstimator(nn.Module):
             trajectories: Multiple trajectories (n_traj, n_steps, ..., dim) or
                          single trajectory (n_steps, ..., dim)
             observable: Observable computed on trajectories
-            dt: Time step used in simulation
+            dt: Time step used in simulation (float or scalar tensor)
             return_diagnostics: If True, return diagnostic info (ESS, variance)
 
         Returns:
@@ -766,6 +766,16 @@ class GirsanovEstimator(nn.Module):
 
             if grad is not None:
                 grads[name] = grad / n_traj
+
+        # Also compute gradient w.r.t dt if it's a tensor requiring grad
+        if isinstance(dt, torch.Tensor) and dt.requires_grad:
+             grad_dt = torch.autograd.grad(
+                 weighted_log_scores, dt,
+                 create_graph=True, retain_graph=True, allow_unused=True
+             )[0]
+
+             if grad_dt is not None:
+                 grads['dt'] = grad_dt / n_traj
 
         if return_diagnostics:
             return grads, diagnostics
@@ -1399,6 +1409,10 @@ class NoseHooverCheckpointedFunction(torch.autograd.Function):
         grad_mass = torch.zeros_like(mass)
         grad_Q = torch.zeros_like(Q)
 
+        # Check if dt requires grad
+        dt_requires_grad = isinstance(dt, torch.Tensor) and dt.requires_grad
+        grad_dt = torch.zeros_like(dt) if dt_requires_grad else None
+
         # Backward pass
         traj_idx = len(grad_traj_x) - 2  # Index for trajectory gradients
 
@@ -1434,28 +1448,34 @@ class NoseHooverCheckpointedFunction(torch.autograd.Function):
                 mass_grad = mass.detach().requires_grad_(True)
                 Q_grad = Q.detach().requires_grad_(True)
 
+                # Handle dt gradient
+                dt_val = dt
+                if dt_requires_grad:
+                    dt_grad_var = dt.detach().requires_grad_(True)
+                    dt_val = dt_grad_var
+
                 # Manually implement NH step with differentiable parameters
                 # (We can't use NoseHoover class here because we need parameter gradients)
                 ndof = x_grad.shape[-1]
 
                 # First thermostat half-step
                 v2 = (v_grad**2).sum(dim=-1)
-                alpha_new = alpha_grad + (dt / 4) * (v2 - ndof * kT_grad) / Q_grad
-                v_new = v_grad * torch.exp(-alpha_new.unsqueeze(-1) * dt / 2)
+                alpha_new = alpha_grad + (dt_val / 4) * (v2 - ndof * kT_grad) / Q_grad
+                v_new = v_grad * torch.exp(-alpha_new.unsqueeze(-1) * dt_val / 2)
                 v2 = (v_new**2).sum(dim=-1)
-                alpha_new = alpha_new + (dt / 4) * (v2 - ndof * kT_grad) / Q_grad
+                alpha_new = alpha_new + (dt_val / 4) * (v2 - ndof * kT_grad) / Q_grad
 
                 # Velocity-Verlet for physical degrees of freedom
-                v_new = v_new + (dt / 2) * force_fn(x_grad) / mass_grad
-                x_new = x_grad + dt * v_new
-                v_new = v_new + (dt / 2) * force_fn(x_new) / mass_grad
+                v_new = v_new + (dt_val / 2) * force_fn(x_grad) / mass_grad
+                x_new = x_grad + dt_val * v_new
+                v_new = v_new + (dt_val / 2) * force_fn(x_new) / mass_grad
 
                 # Second thermostat half-step
                 v2 = (v_new**2).sum(dim=-1)
-                alpha_new = alpha_new + (dt / 4) * (v2 - ndof * kT_grad) / Q_grad
-                v_new = v_new * torch.exp(-alpha_new.unsqueeze(-1) * dt / 2)
+                alpha_new = alpha_new + (dt_val / 4) * (v2 - ndof * kT_grad) / Q_grad
+                v_new = v_new * torch.exp(-alpha_new.unsqueeze(-1) * dt_val / 2)
                 v2 = (v_new**2).sum(dim=-1)
-                alpha_new = alpha_new + (dt / 4) * (v2 - ndof * kT_grad) / Q_grad
+                alpha_new = alpha_new + (dt_val / 4) * (v2 - ndof * kT_grad) / Q_grad
 
                 x_next, v_next, alpha_next = x_new, v_new, alpha_new
 
@@ -1471,9 +1491,13 @@ class NoseHooverCheckpointedFunction(torch.autograd.Function):
                 )
 
                 # Compute gradients (VJPs)
+                inputs = [x_grad, v_grad, alpha_grad, kT_grad, mass_grad, Q_grad]
+                if dt_requires_grad:
+                    inputs.append(dt_grad_var)
+
                 grads = torch.autograd.grad(
                     dummy_loss,
-                    [x_grad, v_grad, alpha_grad, kT_grad, mass_grad, Q_grad],
+                    inputs,
                     allow_unused=True,
                     retain_graph=False
                 )
@@ -1490,10 +1514,12 @@ class NoseHooverCheckpointedFunction(torch.autograd.Function):
                 grad_mass += grads[4]
             if grads[5] is not None:
                 grad_Q += grads[5]
+            if dt_requires_grad and grads[6] is not None:
+                grad_dt += grads[6]
 
         # Return gradients (match forward signature)
         # (x0, v0, alpha0, kT, mass, Q, force_fn, dt, n_steps, store_every, checkpoint_mgr, final_only)
-        return lambda_x, lambda_v, lambda_alpha, grad_kT, grad_mass, grad_Q, None, None, None, None, None, None
+        return lambda_x, lambda_v, lambda_alpha, grad_kT, grad_mass, grad_Q, None, grad_dt, None, None, None, None
 
 
 class CheckpointedNoseHoover(nn.Module):
@@ -1551,7 +1577,7 @@ class CheckpointedNoseHoover(nn.Module):
 
     def run(self, x0: torch.Tensor, v0: Optional[torch.Tensor],
             force_fn: Callable[[torch.Tensor], torch.Tensor],
-            dt: float, n_steps: int, store_every: int = 1,
+            dt: Union[float, torch.Tensor], n_steps: int, store_every: int = 1,
             final_only: bool = False
             ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Run trajectory with checkpointing for O(√T) memory backward pass.
@@ -1560,7 +1586,7 @@ class CheckpointedNoseHoover(nn.Module):
             x0: Initial positions (..., dim)
             v0: Initial velocities (..., dim), or None to sample from thermal distribution
             force_fn: Force function
-            dt: Time step
+            dt: Time step (float or tensor)
             n_steps: Number of integration steps
             store_every: Store trajectory every N steps
             final_only: If True, only return final state for O(√T) memory. 
@@ -1704,7 +1730,7 @@ class ContinuousAdjointNoseHoover(nn.Module):
             dt: Time step (positive, but integration is backward)
 
         Returns:
-            (new_lambda_x, new_lambda_v, new_lambda_alpha, grad_kT, grad_mass, grad_Q)
+            (new_lambda_x, new_lambda_v, new_lambda_alpha, grad_kT, grad_mass, grad_Q, grad_dt)
         """
         ndof = x.shape[-1]
         device = x.device
@@ -1749,7 +1775,21 @@ class ContinuousAdjointNoseHoover(nn.Module):
         grad_mass = -(lambda_v * F / (mass ** 2)).sum() * dt
         grad_Q = -(lambda_alpha * (((v ** 2).sum(dim=-1) - ndof * kT) / (Q ** 2)) * dt).sum()
 
-        return lambda_x_new, lambda_v_new, lambda_alpha_new, grad_kT, grad_mass, grad_Q
+        # Gradient w.r.t dt (scaling of time)
+        # For system dy/dt = f(y), if we scale time t -> s*t, then dy/ds = t*f(y).
+        # But here dt is the step size parameter.
+        # In discrete updates x_new = x + dt*f(x), d(x_new)/d(dt) = f(x).
+        # So contribution is lambda_new^T * f(x).
+        # Using lambda at t (input to step) and state at t (input to step).
+        # grad_dt = lambda^T * vector_field
+
+        grad_dt_x = (lambda_x * v).sum()
+        grad_dt_v = (lambda_v * (F / mass - alpha.unsqueeze(-1) * v)).sum()
+        grad_dt_alpha = (lambda_alpha * (((v ** 2).sum(dim=-1) - ndof * kT) / Q)).sum()
+
+        grad_dt = grad_dt_x + grad_dt_v + grad_dt_alpha
+
+        return lambda_x_new, lambda_v_new, lambda_alpha_new, grad_kT, grad_mass, grad_Q, grad_dt
 
     def adjoint_backward(self, loss_grad_x: List[Optional[torch.Tensor]],
                         loss_grad_v: List[Optional[torch.Tensor]],
@@ -1767,7 +1807,7 @@ class ContinuousAdjointNoseHoover(nn.Module):
             dt: Time step used in forward pass
 
         Returns:
-            Dictionary of parameter gradients: {'kT': grad_kT, 'mass': grad_mass, 'Q': grad_Q}
+            Dictionary of parameter gradients: {'kT': grad_kT, 'mass': grad_mass, 'Q': grad_Q, 'dt': grad_dt}
         """
         T = len(traj_x)
 
@@ -1788,11 +1828,12 @@ class ContinuousAdjointNoseHoover(nn.Module):
         grad_kT = torch.zeros((), device=device, dtype=self.kT.dtype)
         grad_mass = torch.zeros((), device=device, dtype=self.mass.dtype)
         grad_Q = torch.zeros((), device=device, dtype=self.Q.dtype)
+        grad_dt = torch.zeros((), device=device, dtype=traj_x.dtype)
 
         # Backward integration
         for t in range(T - 1, 0, -1):
             # One adjoint step backward
-            lambda_x, lambda_v, lambda_alpha, d_kT, d_mass, d_Q = self.adjoint_step_backward(
+            lambda_x, lambda_v, lambda_alpha, d_kT, d_mass, d_Q, d_dt = self.adjoint_step_backward(
                 lambda_x, lambda_v, lambda_alpha,
                 traj_x[t], traj_v[t], traj_alpha[t],
                 force_fn, dt
@@ -1802,6 +1843,7 @@ class ContinuousAdjointNoseHoover(nn.Module):
             grad_kT += d_kT
             grad_mass += d_mass
             grad_Q += d_Q
+            grad_dt += d_dt
 
             # Add loss gradient contributions at this timestep
             if loss_grad_x[t - 1] is not None:
@@ -1813,6 +1855,7 @@ class ContinuousAdjointNoseHoover(nn.Module):
             'kT': grad_kT,
             'mass': grad_mass,
             'Q': grad_Q,
+            'dt': grad_dt,
             'x0': lambda_x,
             'v0': lambda_v,
             'alpha0': lambda_alpha
