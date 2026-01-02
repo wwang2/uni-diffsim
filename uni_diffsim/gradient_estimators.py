@@ -5,7 +5,7 @@ using statistical estimators instead.
 
 Gradient Estimators:
 - ReinforceEstimator: REINFORCE/score-function estimator for equilibrium observables
-- PathReweightingEstimator: Path likelihood ratio estimator for SDE trajectories (also: GirsanovEstimator)
+- PathReweightingEstimator: Path likelihood ratio estimator for SDE trajectories
 - reinforce_gradient: Functional API for REINFORCE gradient computation
 
 Theory:
@@ -923,8 +923,6 @@ class PathReweightingEstimator(nn.Module):
 
         return variances, diagnostics
 
-# Backward compatibility alias
-GirsanovEstimator = PathReweightingEstimator
 
 class ReweightingLoss(nn.Module):
     """Loss function using REINFORCE gradient for equilibrium observables.

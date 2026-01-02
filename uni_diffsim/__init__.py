@@ -7,7 +7,7 @@ from .integrators import (
     kinetic_energy, temperature,
 )
 from .gradient_estimators import (
-    ReinforceEstimator, PathReweightingEstimator, GirsanovEstimator, ReweightingLoss,
+    ReinforceEstimator, PathReweightingEstimator, ReweightingLoss,
     ImplicitDiffEstimator,
     reinforce_gradient,
     CheckpointManager, CheckpointedNoseHoover, ContinuousAdjointNoseHoover,
@@ -24,7 +24,7 @@ __all__ = [
     "OverdampedLangevin", "BAOAB", "VelocityVerlet", "NoseHooverChain", "ESH", "GLE",
     "kinetic_energy", "temperature",
     # Gradient Estimators
-    "ReinforceEstimator", "PathReweightingEstimator", "GirsanovEstimator", "ReweightingLoss",
+    "ReinforceEstimator", "PathReweightingEstimator", "ReweightingLoss",
     "ImplicitDiffEstimator",
     "reinforce_gradient",
     # Adjoint Methods
