@@ -469,6 +469,173 @@ class Harmonic(Potential):
         return 0.5 * self.k * (x**2).sum(-1)
 
 
+class DimerWCA(Potential):
+    """Bistable dimer in WCA fluid (Nilmeier et al., 2011).
+
+    System setup:
+    - N = n_solvent + 2 particles (default 218).
+    - Particles 0 and 1 form the bistable dimer.
+    - Particles 2..N-1 are WCA solvent.
+    - Box size is determined by density and N.
+
+    Potentials:
+    1. Dimer bonded potential (between 0 and 1):
+       U_bond(r) = h * [1 - ((r - r0 - w)/w)^2]^2
+       Minima at r = r0 (compact) and r = r0 + 2w (extended).
+       Barrier at r = r0 + w with height h.
+
+    2. WCA potential (between all pairs EXCEPT 0-1):
+       U_WCA(r) = 4*eps * [(sigma/r)^12 - (sigma/r)^6] + eps  if r < 2^(1/6)*sigma
+       U_WCA(r) = 0                                            otherwise
+
+    Args:
+        n_solvent: Number of solvent particles (default 216).
+        density: Reduced density rho* (default 0.96).
+        h: Barrier height for dimer (default 1.5).
+        w: Width parameter for dimer (default 0.5).
+        r0: Compact state position (default 2^(1/6) ~= 1.122).
+        eps: WCA epsilon (default 1.0).
+        sigma: WCA sigma (default 1.0).
+    """
+
+    def __init__(self, 
+                 n_solvent: int = 216, 
+                 density: float = 0.96,
+                 h: float = 1.5,
+                 w: float = 0.5,
+                 r0: float | None = None,
+                 eps: float = 1.0,
+                 sigma: float = 1.0):
+        super().__init__()
+        self.n_solvent = n_solvent
+        self.density = density
+        self.eps = nn.Parameter(torch.tensor(eps, dtype=torch.float32))
+        self.sigma = nn.Parameter(torch.tensor(sigma, dtype=torch.float32))
+        
+        if r0 is None:
+            r0 = 2**(1/6) * sigma
+        self.r0 = nn.Parameter(torch.tensor(r0, dtype=torch.float32))
+        self.h = nn.Parameter(torch.tensor(h, dtype=torch.float32))
+        self.w = nn.Parameter(torch.tensor(w, dtype=torch.float32))
+        
+        # Calculate box size: L = (N / rho)^(1/3)
+        n_particles = n_solvent + 2
+        box_len = (n_particles / density)**(1/3)
+        self.register_buffer("box_size", torch.tensor([box_len]*3, dtype=torch.float32))
+        self.n_particles = n_particles
+        
+        # WCA cutoff squared
+        self.rc_wca = 2**(1/6) * sigma
+        self.rc2_wca = self.rc_wca**2
+
+    @property
+    def event_dim(self) -> int:
+        return 2  # (N, 3)
+
+    def _minimum_image(self, diff: torch.Tensor) -> torch.Tensor:
+        """Apply minimum image convention with stored box_size."""
+        return diff - self.box_size * torch.round(diff / self.box_size)
+
+    def energy(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (..., n_particles, 3) -> (...)"""
+        # Validate shape
+        if x.shape[-2] != self.n_particles:
+             # Just a warning or strictly enforce? 
+             # Let's trust the input mostly but n_solvent depends on it.
+             pass
+
+        n = x.shape[-2]
+        device = x.device
+        
+        # --- 1. Dimer Bond Energy (Pair 0-1) ---
+        x0 = x[..., 0, :]
+        x1 = x[..., 1, :]
+        
+        diff_bond = x0 - x1
+        diff_bond = self._minimum_image(diff_bond)
+        r_bond = diff_bond.norm(dim=-1)
+        
+        # U_bond = h * [1 - ((r - r0 - w)/w)^2]^2
+        # scaled_dist = (r - r0 - w) / w
+        scaled_dist = (r_bond - self.r0 - self.w) / self.w
+        u_bond = self.h * (1 - scaled_dist**2)**2
+        
+        # --- 2. WCA Energy (All pairs except 0-1) ---
+        # We can compute WCA for ALL pairs and then subtract WCA for (0,1).
+        # This is efficient because we can use a single vectorized op.
+        # Note: If r01 < rc, we subtract it. If r01 > rc, WCA(0,1) is 0 anyway.
+        
+        # Create indices if not cached
+        if (not hasattr(self, '_indices_cache') or
+            self._indices_cache[0] != n or
+            self._indices_cache[1] != device):
+            idx_i, idx_j = torch.triu_indices(n, n, offset=1, device=device)
+            self._indices_cache = (n, device, idx_i, idx_j)
+        else:
+            _, _, idx_i, idx_j = self._indices_cache
+
+        xi = x[..., idx_i, :]
+        xj = x[..., idx_j, :]
+        
+        diff = xi - xj
+        diff = self._minimum_image(diff)
+        r2 = (diff**2).sum(-1)
+        
+        # WCA logic: U = 4eps((s/r)^12 - (s/r)^6) + eps  for r < rc
+        #            U = 0                             for r >= rc
+        
+        # Mask for cutoff
+        mask = r2 < self.rc2_wca
+        
+        # To maintain differentiability where possible and avoid NaNs for r=0 (unlikely with mask but possible in grad),
+        # we can compute for all and mask, or mask first.
+        # Since r2 can be large, s2 can be small. r2=0 -> inf.
+        # Let's use torch.where to avoid computing on far particles if possible, or just mask result.
+        # But for gradients, masking input or output?
+        # Standard: Compute LJ, add eps, relu.
+        
+        # s2 = sigma^2 / r2
+        # For stability, avoid division by zero if r2 is tiny? WCA implies repulsion so r->0 is high energy.
+        # We only care about r2 < rc2.
+        
+        # A safe way:
+        # u_wca_pairs = torch.zeros_like(r2)
+        # relevant_r2 = r2[mask] -> this breaks shape for batching if mask is data-dependent (it is).
+        # So we must keep shape.
+        
+        # Soft approach for batching:
+        s2 = self.sigma**2 / r2
+        s6 = s2**3
+        lj_part = 4 * self.eps * (s6**2 - s6)
+        wca_pair = lj_part + self.eps
+        
+        # Apply cutoff
+        # Use torch.where. 
+        # Note: if r2 is very large, s2 is 0, lj is 0, + eps -> eps. So we MUST mask.
+        u_pairs = torch.where(mask, wca_pair, torch.zeros_like(wca_pair))
+        
+        # Sum over all pairs
+        u_total_wca = u_pairs.sum(-1)
+        
+        # --- 3. Exclude WCA for Dimer Pair (0,1) ---
+        # We computed WCA for ALL pairs, including (0,1) if it's close enough.
+        # We must subtract it if it was added.
+        
+        # Check if dimer bond is within WCA cutoff
+        mask_bond = r_bond**2 < self.rc2_wca
+        
+        s2_bond = self.sigma**2 / r_bond**2
+        s6_bond = s2_bond**3
+        lj_bond = 4 * self.eps * (s6_bond**2 - s6_bond)
+        wca_bond = lj_bond + self.eps
+        
+        correction = torch.where(mask_bond, wca_bond, torch.zeros_like(wca_bond))
+        
+        u_total_wca = u_total_wca - correction
+        
+        return u_bond + u_total_wca
+
+
 if __name__ == "__main__":
     """Quick sanity check for potentials."""
     import numpy as np
@@ -523,6 +690,44 @@ if __name__ == "__main__":
     u = h.energy(x)
     assert torch.allclose(u, torch.tensor([1.0, 1.0])), "U = 0.5 * k * x^2"
     print(f"  Harmonic: U(1,0)={u[0]:.2f}")
+    
+    # DimerWCA
+    print("  Testing DimerWCA...")
+    # Use very low density to get large box and avoid PBC wrapping issues for simple test
+    dimer_sys = DimerWCA(n_solvent=2, density=1e-5) 
+    # n=4, rho=1e-5 -> V=4e5 -> L=73.6
+    
+    # Place dimer at compact minimum
+    r0 = dimer_sys.r0.item()
+    w = dimer_sys.w.item()
+    # Dimer particles at (0,0,0) and (r0, 0, 0)
+    # Solvent particles far away
+    pos = torch.zeros(1, 4, 3) # 4 particles: 0,1 dimer, 2,3 solvent
+    pos[0, 1, 0] = r0
+    pos[0, 2, 0] = 10.0 # Far enough (L/2 approx 36)
+    pos[0, 3, 0] = 20.0 # Far enough
+    
+    u_compact = dimer_sys.energy(pos)
+    print(f"    U(compact) = {u_compact.item():.4f} (expect ~0)")
+    
+    # Place dimer at barrier
+    pos[0, 1, 0] = r0 + w
+    u_barrier = dimer_sys.energy(pos)
+    print(f"    U(barrier) = {u_barrier.item():.4f} (expect ~1.5)")
+    
+    # Place dimer at extended
+    pos[0, 1, 0] = r0 + 2*w
+    u_extended = dimer_sys.energy(pos)
+    print(f"    U(extended) = {u_extended.item():.4f} (expect ~0)")
+    
+    # Test WCA repulsion
+    # Move solvent close to dimer 0
+    pos[0, 2, 0] = 0.9 # < 2^(1/6) ~= 1.12
+    # Reset dimer to compact
+    pos[0, 1, 0] = r0
+    u_repulse = dimer_sys.energy(pos)
+    print(f"    U(with solvent clash) = {u_repulse.item():.4f} (expect > 0)")
+    
     
     # Test forces (autograd)
     x = torch.tensor([[1.0, 0.0]], requires_grad=True)

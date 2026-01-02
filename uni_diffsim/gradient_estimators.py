@@ -48,6 +48,7 @@ class ReinforceEstimator(nn.Module):
     - Chaotic systems where BPTT fails
     - Long trajectories where memory is limited
     - Non-differentiable integrators
+    - Equibrium sampling
 
     The estimator can be used in two modes:
     1. Stateless: Call estimate_gradient() with samples
@@ -644,7 +645,7 @@ class GirsanovEstimator(nn.Module):
         self,
         trajectories: torch.Tensor,
         observable: Observable,
-        dt: float,
+        dt: Union[float, torch.Tensor],
         return_diagnostics: bool = False,
     ) -> Union[dict[str, torch.Tensor], Tuple[dict[str, torch.Tensor], dict]]:
         """Estimate gradient using Girsanov reweighting with variance reduction.
@@ -658,7 +659,7 @@ class GirsanovEstimator(nn.Module):
             trajectories: Multiple trajectories (n_traj, n_steps, ..., dim) or
                          single trajectory (n_steps, ..., dim)
             observable: Observable computed on trajectories
-            dt: Time step used in simulation
+            dt: Time step used in simulation (float or scalar tensor)
             return_diagnostics: If True, return diagnostic info (ESS, variance)
 
         Returns:
@@ -789,6 +790,16 @@ class GirsanovEstimator(nn.Module):
 
             if grad is not None:
                 grads[name] = grad / n_traj
+
+        # Also compute gradient w.r.t dt if it's a tensor requiring grad
+        if isinstance(dt, torch.Tensor) and dt.requires_grad:
+             grad_dt = torch.autograd.grad(
+                 weighted_log_scores, dt,
+                 create_graph=True, retain_graph=True, allow_unused=True
+             )[0]
+
+             if grad_dt is not None:
+                 grads['dt'] = grad_dt / n_traj
 
         if return_diagnostics:
             return grads, diagnostics
@@ -1422,6 +1433,10 @@ class NoseHooverCheckpointedFunction(torch.autograd.Function):
         grad_mass = torch.zeros_like(mass)
         grad_Q = torch.zeros_like(Q)
 
+        # Check if dt requires grad
+        dt_requires_grad = isinstance(dt, torch.Tensor) and dt.requires_grad
+        grad_dt = torch.zeros_like(dt) if dt_requires_grad else None
+
         # Backward pass
         traj_idx = len(grad_traj_x) - 2  # Index for trajectory gradients
 
@@ -1457,28 +1472,34 @@ class NoseHooverCheckpointedFunction(torch.autograd.Function):
                 mass_grad = mass.detach().requires_grad_(True)
                 Q_grad = Q.detach().requires_grad_(True)
 
+                # Handle dt gradient
+                dt_val = dt
+                if dt_requires_grad:
+                    dt_grad_var = dt.detach().requires_grad_(True)
+                    dt_val = dt_grad_var
+
                 # Manually implement NH step with differentiable parameters
                 # (We can't use NoseHoover class here because we need parameter gradients)
                 ndof = x_grad.shape[-1]
 
                 # First thermostat half-step
                 v2 = (v_grad**2).sum(dim=-1)
-                alpha_new = alpha_grad + (dt / 4) * (v2 - ndof * kT_grad) / Q_grad
-                v_new = v_grad * torch.exp(-alpha_new.unsqueeze(-1) * dt / 2)
+                alpha_new = alpha_grad + (dt_val / 4) * (v2 - ndof * kT_grad) / Q_grad
+                v_new = v_grad * torch.exp(-alpha_new.unsqueeze(-1) * dt_val / 2)
                 v2 = (v_new**2).sum(dim=-1)
-                alpha_new = alpha_new + (dt / 4) * (v2 - ndof * kT_grad) / Q_grad
+                alpha_new = alpha_new + (dt_val / 4) * (v2 - ndof * kT_grad) / Q_grad
 
                 # Velocity-Verlet for physical degrees of freedom
-                v_new = v_new + (dt / 2) * force_fn(x_grad) / mass_grad
-                x_new = x_grad + dt * v_new
-                v_new = v_new + (dt / 2) * force_fn(x_new) / mass_grad
+                v_new = v_new + (dt_val / 2) * force_fn(x_grad) / mass_grad
+                x_new = x_grad + dt_val * v_new
+                v_new = v_new + (dt_val / 2) * force_fn(x_new) / mass_grad
 
                 # Second thermostat half-step
                 v2 = (v_new**2).sum(dim=-1)
-                alpha_new = alpha_new + (dt / 4) * (v2 - ndof * kT_grad) / Q_grad
-                v_new = v_new * torch.exp(-alpha_new.unsqueeze(-1) * dt / 2)
+                alpha_new = alpha_new + (dt_val / 4) * (v2 - ndof * kT_grad) / Q_grad
+                v_new = v_new * torch.exp(-alpha_new.unsqueeze(-1) * dt_val / 2)
                 v2 = (v_new**2).sum(dim=-1)
-                alpha_new = alpha_new + (dt / 4) * (v2 - ndof * kT_grad) / Q_grad
+                alpha_new = alpha_new + (dt_val / 4) * (v2 - ndof * kT_grad) / Q_grad
 
                 x_next, v_next, alpha_next = x_new, v_new, alpha_new
 
@@ -1494,9 +1515,13 @@ class NoseHooverCheckpointedFunction(torch.autograd.Function):
                 )
 
                 # Compute gradients (VJPs)
+                inputs = [x_grad, v_grad, alpha_grad, kT_grad, mass_grad, Q_grad]
+                if dt_requires_grad:
+                    inputs.append(dt_grad_var)
+
                 grads = torch.autograd.grad(
                     dummy_loss,
-                    [x_grad, v_grad, alpha_grad, kT_grad, mass_grad, Q_grad],
+                    inputs,
                     allow_unused=True,
                     retain_graph=False
                 )
@@ -1513,10 +1538,12 @@ class NoseHooverCheckpointedFunction(torch.autograd.Function):
                 grad_mass += grads[4]
             if grads[5] is not None:
                 grad_Q += grads[5]
+            if dt_requires_grad and grads[6] is not None:
+                grad_dt += grads[6]
 
         # Return gradients (match forward signature)
         # (x0, v0, alpha0, kT, mass, Q, force_fn, dt, n_steps, store_every, checkpoint_mgr, final_only)
-        return lambda_x, lambda_v, lambda_alpha, grad_kT, grad_mass, grad_Q, None, None, None, None, None, None
+        return lambda_x, lambda_v, lambda_alpha, grad_kT, grad_mass, grad_Q, None, grad_dt, None, None, None, None
 
 
 class CheckpointedNoseHoover(nn.Module):
@@ -1574,7 +1601,7 @@ class CheckpointedNoseHoover(nn.Module):
 
     def run(self, x0: torch.Tensor, v0: Optional[torch.Tensor],
             force_fn: Callable[[torch.Tensor], torch.Tensor],
-            dt: float, n_steps: int, store_every: int = 1,
+            dt: Union[float, torch.Tensor], n_steps: int, store_every: int = 1,
             final_only: bool = False
             ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Run trajectory with checkpointing for O(√T) memory backward pass.
@@ -1583,7 +1610,7 @@ class CheckpointedNoseHoover(nn.Module):
             x0: Initial positions (..., dim)
             v0: Initial velocities (..., dim), or None to sample from thermal distribution
             force_fn: Force function
-            dt: Time step
+            dt: Time step (float or tensor)
             n_steps: Number of integration steps
             store_every: Store trajectory every N steps
             final_only: If True, only return final state for O(√T) memory. 
@@ -1727,7 +1754,7 @@ class ContinuousAdjointNoseHoover(nn.Module):
             dt: Time step (positive, but integration is backward)
 
         Returns:
-            (new_lambda_x, new_lambda_v, new_lambda_alpha, grad_kT, grad_mass, grad_Q)
+            (new_lambda_x, new_lambda_v, new_lambda_alpha, grad_kT, grad_mass, grad_Q, grad_dt)
         """
         ndof = x.shape[-1]
         device = x.device
@@ -1772,7 +1799,21 @@ class ContinuousAdjointNoseHoover(nn.Module):
         grad_mass = -(lambda_v * F / (mass ** 2)).sum() * dt
         grad_Q = -(lambda_alpha * (((v ** 2).sum(dim=-1) - ndof * kT) / (Q ** 2)) * dt).sum()
 
-        return lambda_x_new, lambda_v_new, lambda_alpha_new, grad_kT, grad_mass, grad_Q
+        # Gradient w.r.t dt (scaling of time)
+        # For system dy/dt = f(y), if we scale time t -> s*t, then dy/ds = t*f(y).
+        # But here dt is the step size parameter.
+        # In discrete updates x_new = x + dt*f(x), d(x_new)/d(dt) = f(x).
+        # So contribution is lambda_new^T * f(x).
+        # Using lambda at t (input to step) and state at t (input to step).
+        # grad_dt = lambda^T * vector_field
+
+        grad_dt_x = (lambda_x * v).sum()
+        grad_dt_v = (lambda_v * (F / mass - alpha.unsqueeze(-1) * v)).sum()
+        grad_dt_alpha = (lambda_alpha * (((v ** 2).sum(dim=-1) - ndof * kT) / Q)).sum()
+
+        grad_dt = grad_dt_x + grad_dt_v + grad_dt_alpha
+
+        return lambda_x_new, lambda_v_new, lambda_alpha_new, grad_kT, grad_mass, grad_Q, grad_dt
 
     def adjoint_backward(self, loss_grad_x: List[Optional[torch.Tensor]],
                         loss_grad_v: List[Optional[torch.Tensor]],
@@ -1790,7 +1831,7 @@ class ContinuousAdjointNoseHoover(nn.Module):
             dt: Time step used in forward pass
 
         Returns:
-            Dictionary of parameter gradients: {'kT': grad_kT, 'mass': grad_mass, 'Q': grad_Q}
+            Dictionary of parameter gradients: {'kT': grad_kT, 'mass': grad_mass, 'Q': grad_Q, 'dt': grad_dt}
         """
         T = len(traj_x)
 
@@ -1811,11 +1852,12 @@ class ContinuousAdjointNoseHoover(nn.Module):
         grad_kT = torch.zeros((), device=device, dtype=self.kT.dtype)
         grad_mass = torch.zeros((), device=device, dtype=self.mass.dtype)
         grad_Q = torch.zeros((), device=device, dtype=self.Q.dtype)
+        grad_dt = torch.zeros((), device=device, dtype=traj_x.dtype)
 
         # Backward integration
         for t in range(T - 1, 0, -1):
             # One adjoint step backward
-            lambda_x, lambda_v, lambda_alpha, d_kT, d_mass, d_Q = self.adjoint_step_backward(
+            lambda_x, lambda_v, lambda_alpha, d_kT, d_mass, d_Q, d_dt = self.adjoint_step_backward(
                 lambda_x, lambda_v, lambda_alpha,
                 traj_x[t], traj_v[t], traj_alpha[t],
                 force_fn, dt
@@ -1825,6 +1867,7 @@ class ContinuousAdjointNoseHoover(nn.Module):
             grad_kT += d_kT
             grad_mass += d_mass
             grad_Q += d_Q
+            grad_dt += d_dt
 
             # Add loss gradient contributions at this timestep
             if loss_grad_x[t - 1] is not None:
@@ -1836,6 +1879,7 @@ class ContinuousAdjointNoseHoover(nn.Module):
             'kT': grad_kT,
             'mass': grad_mass,
             'Q': grad_Q,
+            'dt': grad_dt,
             'x0': lambda_x,
             'v0': lambda_v,
             'alpha0': lambda_alpha
@@ -1937,7 +1981,7 @@ class DiscreteAdjointNoseHoover(nn.Module):
             dt: Time step
             
         Returns:
-            (new_lambda_x, new_lambda_v, new_lambda_alpha, grad_kT, grad_mass, grad_Q)
+            (new_lambda_x, new_lambda_v, new_lambda_alpha, grad_kT, grad_mass, grad_Q, grad_dt)
         """
         device = x.device
         ndof = x.shape[-1]
@@ -1969,6 +2013,7 @@ class DiscreteAdjointNoseHoover(nn.Module):
         grad_kT = torch.zeros((), device=device, dtype=kT.dtype)
         grad_mass = torch.zeros((), device=device, dtype=mass.dtype)
         grad_Q = torch.zeros((), device=device, dtype=Q.dtype)
+        grad_dt = torch.zeros((), device=device, dtype=x.dtype)
         
         lam_x = lambda_x.clone()
         lam_v = lambda_v.clone()
@@ -1977,18 +2022,27 @@ class DiscreteAdjointNoseHoover(nn.Module):
         # Adjoint of Step 9: α' = α₃ + (dt/4)(v₄² - ndof·kT)/Q
         lam_alpha3 = lam_alpha.clone()
         lam_v4 = lam_v + lam_alpha.unsqueeze(-1) * (dt / 2) * v4 / Q
-        grad_kT = grad_kT - (lam_alpha * (dt / 4) * ndof / Q).sum()
-        grad_Q = grad_Q - (lam_alpha * (dt / 4) * (v4_2 - ndof * kT) / (Q ** 2)).sum()
+
+        term = (lam_alpha * (v4_2 - ndof * kT) / Q)
+        grad_dt += (term / 4).sum()
+        grad_kT -= (lam_alpha * (dt / 4) * ndof / Q).sum()
+        grad_Q -= (lam_alpha * (dt / 4) * (v4_2 - ndof * kT) / (Q ** 2)).sum()
         
         # Adjoint of Step 8: v₄ = v₃ * exp(-α₃ * dt/2)
         lam_v3 = lam_v4 * exp_neg_a3
-        lam_alpha3 = lam_alpha3 - (dt / 2) * (lam_v4 * v4).sum(dim=-1)
+
+        term = (lam_v4 * v4 * (-alpha3.unsqueeze(-1) / 2))
+        grad_dt += term.sum()
+        lam_alpha3 -= (lam_v4 * v4 * (-dt / 2)).sum(dim=-1) # Fixed from previous: was just (dt/2)
         
         # Adjoint of Step 7: α₃ = α₂ + (dt/4)(v₃² - ndof·kT)/Q
         lam_alpha2 = lam_alpha3.clone()
         lam_v3 = lam_v3 + lam_alpha3.unsqueeze(-1) * (dt / 2) * v3 / Q
-        grad_kT = grad_kT - (lam_alpha3 * (dt / 4) * ndof / Q).sum()
-        grad_Q = grad_Q - (lam_alpha3 * (dt / 4) * (v3_2 - ndof * kT) / (Q ** 2)).sum()
+
+        term = (lam_alpha3 * (v3_2 - ndof * kT) / Q)
+        grad_dt += (term / 4).sum()
+        grad_kT -= (lam_alpha3 * (dt / 4) * ndof / Q).sum()
+        grad_Q -= (lam_alpha3 * (dt / 4) * (v3_2 - ndof * kT) / (Q ** 2)).sum()
         
         # Adjoint of Step 6: v₃ = v₂ + (dt/2) * F(x')/m
         lam_v2 = lam_v3.clone()
@@ -1997,13 +2051,18 @@ class DiscreteAdjointNoseHoover(nn.Module):
         vjp_x1 = torch.autograd.grad(F1_recompute, x_new_grad, grad_outputs=lam_v3,
                                       create_graph=False, retain_graph=False)[0]
         lam_x_from_v = vjp_x1 * (dt / 2) / mass
-        grad_mass = grad_mass - ((lam_v3 * F1).sum() * (dt / 2) / (mass ** 2))
+
+        term = (lam_v3 * F1 / mass)
+        grad_dt += (term / 2).sum()
+        grad_mass -= ((lam_v3 * F1).sum() * (dt / 2) / (mass ** 2))
         
         # Adjoint of Step 5: x' = x + dt * v₂
         lam_x_new = lam_x + lam_x_from_v
         lam_x_0 = lam_x_new.clone()
         lam_v2 = lam_v2 + dt * lam_x_new
         
+        grad_dt += (lam_x_new * v2_vec).sum()
+
         # Adjoint of Step 4: v₂ = v₁ + (dt/2) * F(x)/m
         lam_v1 = lam_v2.clone()
         x_grad = x.detach().requires_grad_(True)
@@ -2011,25 +2070,37 @@ class DiscreteAdjointNoseHoover(nn.Module):
         vjp_x0 = torch.autograd.grad(F0_recompute, x_grad, grad_outputs=lam_v2,
                                       create_graph=False, retain_graph=False)[0]
         lam_x_0 = lam_x_0 + vjp_x0 * (dt / 2) / mass
-        grad_mass = grad_mass - ((lam_v2 * F0).sum() * (dt / 2) / (mass ** 2))
+
+        term = (lam_v2 * F0 / mass)
+        grad_dt += (term / 2).sum()
+        grad_mass -= ((lam_v2 * F0).sum() * (dt / 2) / (mass ** 2))
         
         # Adjoint of Step 3: α₂ = α₁ + (dt/4)(v₁² - ndof·kT)/Q
         lam_alpha1 = lam_alpha2.clone()
         lam_v1 = lam_v1 + lam_alpha2.unsqueeze(-1) * (dt / 2) * v1 / Q
-        grad_kT = grad_kT - (lam_alpha2 * (dt / 4) * ndof / Q).sum()
-        grad_Q = grad_Q - (lam_alpha2 * (dt / 4) * (v1_2 - ndof * kT) / (Q ** 2)).sum()
+
+        term = (lam_alpha2 * (v1_2 - ndof * kT) / Q)
+        grad_dt += (term / 4).sum()
+        grad_kT -= (lam_alpha2 * (dt / 4) * ndof / Q).sum()
+        grad_Q -= (lam_alpha2 * (dt / 4) * (v1_2 - ndof * kT) / (Q ** 2)).sum()
         
         # Adjoint of Step 2: v₁ = v * exp(-α₁ * dt/2)
         lam_v_0 = lam_v1 * exp_neg_a1
-        lam_alpha1 = lam_alpha1 - (dt / 2) * (lam_v1 * v1).sum(dim=-1)
+
+        term = (lam_v1 * v1 * (-alpha1.unsqueeze(-1) / 2))
+        grad_dt += term.sum()
+        lam_alpha1 -= (lam_v1 * v1 * (-dt / 2)).sum(dim=-1) # Fixed: was (dt/2)
         
         # Adjoint of Step 1: α₁ = α + (dt/4)(v² - ndof·kT)/Q
         lam_alpha_0 = lam_alpha1.clone()
         lam_v_0 = lam_v_0 + lam_alpha1.unsqueeze(-1) * (dt / 2) * v / Q
-        grad_kT = grad_kT - (lam_alpha1 * (dt / 4) * ndof / Q).sum()
-        grad_Q = grad_Q - (lam_alpha1 * (dt / 4) * (v2 - ndof * kT) / (Q ** 2)).sum()
         
-        return lam_x_0, lam_v_0, lam_alpha_0, grad_kT, grad_mass, grad_Q
+        term = (lam_alpha1 * (v2 - ndof * kT) / Q)
+        grad_dt += (term / 4).sum()
+        grad_kT -= (lam_alpha1 * (dt / 4) * ndof / Q).sum()
+        grad_Q -= (lam_alpha1 * (dt / 4) * (v2 - ndof * kT) / (Q ** 2)).sum()
+
+        return lam_x_0, lam_v_0, lam_alpha_0, grad_kT, grad_mass, grad_Q, grad_dt
     
     def run(self, x0: torch.Tensor, v0: Optional[torch.Tensor],
             force_fn: Callable, dt: float, n_steps: int, store_every: int = 1
@@ -2080,14 +2151,18 @@ class DiscreteAdjointNoseHoover(nn.Module):
         grad_kT = torch.zeros((), device=device, dtype=self.kT.dtype)
         grad_mass = torch.zeros((), device=device, dtype=self.mass.dtype)
         grad_Q = torch.zeros((), device=device, dtype=self.Q.dtype)
+        grad_dt = torch.zeros((), device=device, dtype=traj_x.dtype)
         
         for t in range(T - 1, 0, -1):
-            lambda_x, lambda_v, lambda_alpha, d_kT, d_mass, d_Q = self.adjoint_step(
+            lambda_x, lambda_v, lambda_alpha, d_kT, d_mass, d_Q, d_dt = self.adjoint_step(
                 lambda_x, lambda_v, lambda_alpha,
                 traj_x[t - 1], traj_v[t - 1], traj_alpha[t - 1],
                 force_fn, dt
             )
-            grad_kT, grad_mass, grad_Q = grad_kT + d_kT, grad_mass + d_mass, grad_Q + d_Q
+            grad_kT = grad_kT + d_kT
+            grad_mass = grad_mass + d_mass
+            grad_Q = grad_Q + d_Q
+            grad_dt = grad_dt + d_dt
             
             if loss_grad_x[t - 1] is not None:
                 lambda_x = lambda_x + loss_grad_x[t - 1]
@@ -2095,7 +2170,7 @@ class DiscreteAdjointNoseHoover(nn.Module):
                 lambda_v = lambda_v + loss_grad_v[t - 1]
         
         return {
-            'kT': grad_kT, 'mass': grad_mass, 'Q': grad_Q,
+            'kT': grad_kT, 'mass': grad_mass, 'Q': grad_Q, 'dt': grad_dt,
             'x0': lambda_x, 'v0': lambda_v, 'alpha0': lambda_alpha
         }
 
@@ -2130,33 +2205,64 @@ class ForwardSensitivityEstimator(nn.Module):
 
         This implementation uses jacfwd on the entire run, which is convenient 
         but memory-intensive for long trajectories.
+
+        To differentiate w.r.t 'dt', pass it as a keyword argument 'dt' that requires grad.
         """
         from torch.func import jacfwd
 
         params = dict(self.integrator.named_parameters())
         target_params = {k: params[k] for k in self.param_names if k in params}
         
-        if not target_params:
-            raise ValueError(f"No target parameters found in integrator: {self.param_names}")
+        # Check for differentiable dt in kwargs
+        dt_val = kwargs.get('dt')
+        diff_args = {}
+        if isinstance(dt_val, torch.Tensor) and dt_val.requires_grad:
+             diff_args['dt'] = dt_val
+             # Remove dt from kwargs passed to closure, so we can inject it
+             # Note: we copy kwargs to avoid modifying input
+             kwargs = kwargs.copy()
+             del kwargs['dt']
+
+        # Combine inputs to differentiate
+        diff_inputs = {**target_params, **diff_args}
+
+        if not diff_inputs:
+            raise ValueError(f"No target parameters found (checked {self.param_names} and differentiable 'dt')")
         
         other_params = {k: v for k, v in params.items() if k not in target_params}
 
-        def wrapper(p_subset):
-            full_params = {**other_params, **p_subset}
-            return functional_call(self.integrator, full_params, args=args, kwargs=kwargs, strict=False)
+        def wrapper(inputs):
+            # Split inputs back into params and args
+            p_subset = {k: v for k, v in inputs.items() if k in target_params}
+            a_subset = {k: v for k, v in inputs.items() if k in diff_args}
 
-        jac_output = jacfwd(wrapper)(target_params)
+            full_params = {**other_params, **p_subset}
+
+            # Inject dynamic args back
+            current_kwargs = kwargs.copy()
+            current_kwargs.update(a_subset) # Puts 'dt' back in if present
+
+            return functional_call(self.integrator, full_params, args=args, kwargs=current_kwargs, strict=False)
+
+        jac_output = jacfwd(wrapper)(diff_inputs)
         
         with torch.no_grad():
              if hasattr(self.integrator, 'forward'):
-                 primal = self.integrator(*args, **kwargs)
+                 # Reconstruct kwargs with dt for primal run
+                 run_kwargs = kwargs.copy()
+                 if 'dt' in diff_args:
+                     run_kwargs['dt'] = diff_args['dt']
+                 primal = self.integrator(*args, **run_kwargs)
              else:
-                 primal = self.integrator.run(*args, **kwargs)
+                 run_kwargs = kwargs.copy()
+                 if 'dt' in diff_args:
+                     run_kwargs['dt'] = diff_args['dt']
+                 primal = self.integrator.run(*args, **run_kwargs)
                  
         return primal, jac_output
 
     def forward_sensitivity_online(self, x0: torch.Tensor, v0: Optional[torch.Tensor], 
-                                 force_fn: Callable, dt: float, n_steps: int, 
+                                 force_fn: Callable, dt: float | torch.Tensor, n_steps: int,
                                  store_every: int = 1) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Optimized online forward sensitivity propagation.
         
@@ -2173,43 +2279,57 @@ class ForwardSensitivityEstimator(nn.Module):
         target_params = {k: params[k] for k in target_names}
         other_params = {k: v for k, v in params.items() if k not in target_params}
         
+        # Check if dt requires grad
+        dt_requires_grad = isinstance(dt, torch.Tensor) and dt.requires_grad
+
         # 1. Define the step function
-        # We need a function that takes target_params and returns next state
-        def step_func(p_target, state_tuple):
+        # We need a function that takes target_params AND dt and returns next state
+        def step_func(p_target, state_tuple, dt_val):
             p_full = {**other_params, **p_target}
             # Unpack state
             if len(state_tuple) == 3: # NoseHoover (x, v, alpha)
                 x, v, alpha = state_tuple
-                return functional_call(self.integrator, p_full, (x, v, alpha, force_fn, dt))
+                return functional_call(self.integrator, p_full, (x, v, alpha, force_fn, dt_val))
             else: # Standard (x, v)
                 x, v = state_tuple
-                return functional_call(self.integrator, p_full, (x, v, force_fn, dt))
+                return functional_call(self.integrator, p_full, (x, v, force_fn, dt_val))
 
         # 2. Setup for parallel sensitivity propagation
         # We use a flattened view for the basis
         flat_params = torch.cat([p.view(-1) for p in target_params.values()])
         n_params = flat_params.numel()
         
+        # If dt requires grad, add 1 dimension for it
+        total_dim = n_params + (1 if dt_requires_grad else 0)
+
         # Initial state
         state = (x0, v0) if v0 is not None else (x0,)
 
         # Jacobians: initialized to zero
-        # Sensitivities have shape (n_params, *state_shape)
-        state_jacs = tuple(torch.zeros(n_params, *s.shape, device=s.device, dtype=s.dtype) for s in state)
+        # Sensitivities have shape (total_dim, *state_shape)
+        state_jacs = tuple(torch.zeros(total_dim, *s.shape, device=s.device, dtype=s.dtype) for s in state)
 
-        # Flattened basis: (n_params, target_params_dict)
+        # Flattened basis: (total_dim, target_params_dict) + dt_tangent
         # This allows us to vmap over the parameter dimension
-        def get_tangent_dict(idx):
-            d = {}
+        def get_tangents(idx):
+            # Param tangents
+            d_params = {}
             curr = 0
             for k, p in target_params.items():
                 size = p.numel()
                 t = torch.zeros_like(p)
-                if idx >= curr and idx < curr + size:
+                # If idx is within this parameter's range
+                if idx < n_params and idx >= curr and idx < curr + size:
                     t.view(-1)[idx - curr] = 1.0
-                d[k] = t
+                d_params[k] = t
                 curr += size
-            return d
+
+            # dt tangent
+            d_dt = torch.tensor(0.0, device=x0.device)
+            if dt_requires_grad and idx == n_params:
+                d_dt = torch.tensor(1.0, device=x0.device)
+
+            return d_params, d_dt
 
         # 3. Propagation Loop
         # J_next = JVP(step, (params, state), (param_tangent, J_curr))
@@ -2225,12 +2345,15 @@ class ForwardSensitivityEstimator(nn.Module):
         for step_idx in range(1, n_steps + 1):
             # Propagate all n_params sensitivities in parallel using vmap(jvp)
             def jvp_wrapper(idx):
-                p_tangent = get_tangent_dict(idx)
+                p_tangent, dt_tangent = get_tangents(idx)
                 state_tangent = tuple(j[idx] for j in curr_jacs)
-                return jvp(step_func, (target_params, curr_state), (p_tangent, state_tangent))
+                # Primal inputs: target_params, curr_state, dt
+                # Tangents: p_tangent, state_tangent, dt_tangent
+                return jvp(step_func, (target_params, curr_state, dt), (p_tangent, state_tangent, dt_tangent))
             
             # This computes (new_state, new_jacs)
-            res = vmap(jvp_wrapper)(torch.arange(n_params, device=x0.device))
+            # vmap over total_dim
+            res = vmap(jvp_wrapper)(torch.arange(total_dim, device=x0.device))
             
             # res structure: ( (new_x, new_v), (jac_x, jac_v) )
             new_state_all = res[0]
@@ -2248,10 +2371,15 @@ class ForwardSensitivityEstimator(nn.Module):
         curr = 0
         for k, p in target_params.items():
             size = p.numel()
-            j = curr_jacs[0][curr:curr+size] # Position jacobian
+            j = curr_jacs[0][curr:curr+size] # Position jacobian slice
             final_jacs[k] = j.movedim(0, -1).reshape(*x0.shape, *p.shape)
             curr += size
             
+        if dt_requires_grad:
+            # Last element is dt sensitivity
+            j = curr_jacs[0][n_params]
+            final_jacs['dt'] = j # (..., dim) -> sensitivity of final x w.r.t dt
+
         return traj_states[0], final_jacs
 
 
