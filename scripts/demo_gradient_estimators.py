@@ -46,7 +46,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from uni_diffsim import (
     OverdampedLangevin, BAOAB,
     DoubleWell, AsymmetricDoubleWell, Harmonic,
-    ReinforceEstimator, ImplicitDiffEstimator, GirsanovEstimator,
+    ReinforceEstimator, ImplicitDiffEstimator, PathReweightingEstimator,
 )
 from uni_diffsim.plotting import apply_style, COLORS as BASE_COLORS, LW, MS
 
@@ -155,7 +155,7 @@ def run_harmonic_equilibrium():
 
             # Girsanov
             potential_gir = Harmonic(k=k)
-            estimator_gir = GirsanovEstimator(potential_gir, sigma=np.sqrt(2*kT), beta=beta)
+            estimator_gir = PathReweightingEstimator(potential_gir, sigma=np.sqrt(2*kT), beta=beta)
             # Girsanov needs trajectories (n_traj, n_steps, dim)
             traj_gir = traj.detach().transpose(0, 1)  # (n_walkers, n_steps, 1)
             # Observable takes trajectory, returns (n_walkers,)
@@ -224,7 +224,7 @@ def run_harmonic_equilibrium():
                     grads = estimator.estimate_gradient(samples, observable=observable)
                     grad = 2 * (var - target_var) * grads['k'].item()
                 else: # Girsanov
-                    estimator = GirsanovEstimator(potential_for_grad, sigma=np.sqrt(2*kT), beta=beta)
+                    estimator = PathReweightingEstimator(potential_for_grad, sigma=np.sqrt(2*kT), beta=beta)
                     traj_gir = traj.transpose(0, 1)
                     obs_gir = lambda t: (t[:, burn_in//5:]**2).mean(dim=1).sum(dim=-1)
                     grads = estimator.estimate_gradient(traj_gir, observable=obs_gir, dt=dt*5)
@@ -409,7 +409,7 @@ def run_asymmetric_equilibrium():
 
             # Girsanov
             potential_gir = AsymmetricDoubleWell(barrier_height=1.0, asymmetry=b)
-            estimator_gir = GirsanovEstimator(potential_gir, sigma=np.sqrt(2*kT), beta=beta)
+            estimator_gir = PathReweightingEstimator(potential_gir, sigma=np.sqrt(2*kT), beta=beta)
             traj_gir = traj.detach().transpose(0, 1)
             obs_gir = lambda t: t[:, burn_in//5:].mean(dim=1).squeeze(-1)
             grads_gir = estimator_gir.estimate_gradient(traj_gir, observable=obs_gir, dt=dt*5)
@@ -533,7 +533,7 @@ def run_fpt_nonequilibrium():
 
             # Girsanov - VALID for non-equilibrium!
             potential_gir = DoubleWell(barrier_height=b)
-            estimator_gir = GirsanovEstimator(potential_gir, sigma=np.sqrt(2*kT), beta=beta)
+            estimator_gir = PathReweightingEstimator(potential_gir, sigma=np.sqrt(2*kT), beta=beta)
             traj_gir = traj.detach().transpose(0, 1) # (n_walkers, n_steps, 1)
             # FPT depends on full trajectory
             obs_gir = lambda t: torch.stack([soft_fpt(t[i].unsqueeze(1), threshold=0.0, sigma=0.1, dt=dt) for i in range(t.shape[0])])
@@ -597,7 +597,7 @@ def run_fpt_nonequilibrium():
                 
                 if method == 'Girsanov':
                      potential_gir = DoubleWell(barrier_height=barrier_param)
-                     estimator = GirsanovEstimator(potential_gir, sigma=np.sqrt(2*kT), beta=beta)
+                     estimator = PathReweightingEstimator(potential_gir, sigma=np.sqrt(2*kT), beta=beta)
                      traj_gir = traj.transpose(0, 1)
                      # Same vectorized FPT calculation
                      obs_gir = lambda t: torch.stack([soft_fpt(t[i].unsqueeze(1), threshold=0.0, sigma=0.1, dt=dt) for i in range(t.shape[0])])
@@ -673,7 +673,7 @@ def run_transition_prob_nonequilibrium():
 
             # Girsanov - VALID for non-equilibrium!
             potential_gir = DoubleWell(barrier_height=b)
-            estimator_gir = GirsanovEstimator(potential_gir, sigma=np.sqrt(2*kT), beta=beta)
+            estimator_gir = PathReweightingEstimator(potential_gir, sigma=np.sqrt(2*kT), beta=beta)
             traj_gir = traj.detach().transpose(0, 1) # (n_walkers, n_steps, 1)
             # Observable: soft indicator of final position
             obs_gir = lambda t: soft_indicator(t[:, -1, 0], 0.0, sigma_soft)
@@ -734,7 +734,7 @@ def run_transition_prob_nonequilibrium():
                 
                 if method == 'Girsanov':
                      potential_gir = DoubleWell(barrier_height=barrier_param)
-                     estimator = GirsanovEstimator(potential_gir, sigma=np.sqrt(2*kT), beta=beta)
+                     estimator = PathReweightingEstimator(potential_gir, sigma=np.sqrt(2*kT), beta=beta)
                      traj_gir = traj.transpose(0, 1)
                      obs_gir = lambda t: soft_indicator(t[:, -1, 0], 0.0, sigma_soft)
                      grads = estimator.estimate_gradient(traj_gir, observable=obs_gir, dt=dt)

@@ -5,6 +5,7 @@ using statistical estimators instead.
 
 Gradient Estimators:
 - ReinforceEstimator: REINFORCE/score-function estimator for equilibrium observables
+- PathReweightingEstimator: Path likelihood ratio estimator for SDE trajectories
 - reinforce_gradient: Functional API for REINFORCE gradient computation
 
 Theory:
@@ -461,17 +462,26 @@ def reinforce_gradient(
     return estimator.estimate_gradient(samples, observable)
 
 
-class GirsanovEstimator(nn.Module):
-    """Girsanov-based path reweighting for gradient estimation.
+class PathReweightingEstimator(nn.Module):
+    """Path reweighting gradient estimator for SDE trajectories.
 
-    For Langevin dynamics dx = F_θ(x)dt + σdW, the log path probability is:
+    Computes gradients using the likelihood ratio method on path space.
+    For Langevin dynamics dx = F_θ(x)dt + σdW, the path log-likelihood
+    gradient is given by the Girsanov-Cameron-Martin formula:
 
-        log p(τ|θ) ∝ ∫₀ᵀ (1/σ²) F_θ(x_t) · (dx_t - F_θ(x_t)dt)
+        ∇_θ log p(τ|θ) = (1/σ²) ∫₀ᵀ ∇_θF_θ(x_t) · dW_t
 
-    This allows reweighting trajectories when parameters change:
-        ⟨O⟩_θ' = ⟨O · w(τ)⟩_θ / ⟨w(τ)⟩_θ
+    This enables the estimator:
+        ∇_θ ⟨O⟩ = ⟨O · ∇_θ log p(τ|θ)⟩
 
-    where w(τ) = exp(log p(τ|θ') - log p(τ|θ)).
+    Also known as:
+    - Likelihood Ratio (LR) method (operations research)
+    - Girsanov reweighting (mathematical finance/stochastic analysis)
+    - Path integral gradient (physics)
+
+    Note: This is distinct from "score function" in diffusion models,
+    which refers to ∇_x log p(x), the spatial gradient of log-density.
+    Here we compute ∇_θ log p(τ|θ), the parameter gradient of path likelihood.
 
     Variance Reduction Methods:
     ---------------------------
@@ -2420,12 +2430,12 @@ if __name__ == "__main__":
     assert 'k' in grads_func
     print(f"  reinforce_gradient: OK")
     
-    # Test GirsanovEstimator with variance reduction
-    print("\n  Testing GirsanovEstimator variance reduction methods:")
+    # Test PathReweightingEstimator with variance reduction
+    print("\n  Testing PathReweightingEstimator variance reduction methods:")
     traj_short = integrator.run(x0[:10], potential.force, dt=0.01, n_steps=50)
     
     for vr_method in [None, "center", "truncate", "self_normalize"]:
-        gir = GirsanovEstimator(potential, sigma=1.0, beta=beta, variance_reduction=vr_method)
+        gir = PathReweightingEstimator(potential, sigma=1.0, beta=beta, variance_reduction=vr_method)
         score = gir.compute_log_path_score(traj_short, dt=0.01)
         assert score.numel() > 0, f"Score should be non-empty, got {score.shape}"
         
@@ -2437,7 +2447,7 @@ if __name__ == "__main__":
         print(f"    {vr_method or 'none':15s}: ESS={ess_frac:.2%}, grads computed={len(grads)>0}")
     
     # Test ESS computation
-    gir = GirsanovEstimator(potential, sigma=1.0, beta=beta)
+    gir = PathReweightingEstimator(potential, sigma=1.0, beta=beta)
     ess = gir.compute_effective_sample_size(torch.randn(100))
     print(f"  ESS computation: OK (ESS={ess.item():.1f} for uniform random log-weights)")
     

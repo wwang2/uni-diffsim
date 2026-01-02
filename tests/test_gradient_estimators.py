@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.nn as nn
 from uni_diffsim.gradient_estimators import (
-    ReinforceEstimator, GirsanovEstimator, ReweightingLoss,
+    ReinforceEstimator, PathReweightingEstimator, ReweightingLoss,
     reinforce_gradient,
 )
 from uni_diffsim.potentials import DoubleWell, Harmonic, DoubleWell2D
@@ -258,14 +258,14 @@ class TestReweightingLoss:
         assert potential.k.item() != initial_k
 
 
-class TestGirsanovEstimator:
+class TestPathReweightingEstimator:
     """Tests for Girsanov-based path reweighting."""
 
     @pytest.mark.parametrize("device", DEVICES)
     def test_initialization(self, device):
         """Should initialize with potential, sigma, beta."""
         potential = Harmonic(k=1.0).to(device)
-        estimator = GirsanovEstimator(potential, sigma=1.0, beta=1.0)
+        estimator = PathReweightingEstimator(potential, sigma=1.0, beta=1.0)
         assert estimator.sigma.item() == 1.0
         assert estimator.beta.item() == 1.0
 
@@ -273,7 +273,7 @@ class TestGirsanovEstimator:
     def test_log_path_score_shape(self, device):
         """Log path score should have correct shape."""
         potential = Harmonic(k=1.0).to(device)
-        estimator = GirsanovEstimator(potential, sigma=1.0, beta=1.0)
+        estimator = PathReweightingEstimator(potential, sigma=1.0, beta=1.0)
 
         # Trajectory: (n_steps, batch, dim)
         trajectory = torch.randn(100, 10, 2, device=device)
@@ -285,7 +285,7 @@ class TestGirsanovEstimator:
     def test_log_path_score_finite(self, device):
         """Log path score should be finite for reasonable trajectories."""
         potential = Harmonic(k=1.0).to(device)
-        estimator = GirsanovEstimator(potential, sigma=1.0, beta=1.0)
+        estimator = PathReweightingEstimator(potential, sigma=1.0, beta=1.0)
 
         # Generate smooth trajectory (not realistic but tests computation)
         trajectory = torch.randn(100, 2, device=device).cumsum(dim=0) * 0.01
