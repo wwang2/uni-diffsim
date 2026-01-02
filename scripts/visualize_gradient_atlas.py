@@ -92,6 +92,7 @@ def double_well_potential_np(x, a=0.8, b=0.5):
 
 def run_sim(integrator, x0, n_steps, dt, store_every=1):
     """Unified runner for all integrators on DEVICE."""
+    torch.manual_seed(100)
     x0 = x0.to(DEVICE)
     if isinstance(integrator, NoseHoover):
         traj_x, traj_v = integrator.run(x0, v0=None, force_fn=POTENTIAL.force, 
@@ -113,26 +114,20 @@ _EXEMPLAR_ODE_TRAJECTORY = None
 @torch.no_grad()
 def get_exemplar_trajectory():
     """Shared SDE trajectory (cached)."""
-    global _EXEMPLAR_TRAJECTORY
-    if _EXEMPLAR_TRAJECTORY is None:
-        n_steps, dt = 250, 0.002
-        od = OverdampedLangevin(gamma=1.0, kT=0.15).to(DEVICE)
-        x0 = torch.tensor([-0.7], device=DEVICE)
-        traj = run_sim(od, x0, n_steps, dt)
-        _EXEMPLAR_TRAJECTORY = (np.linspace(0, 1, n_steps+1), traj[:, 0])
-    return _EXEMPLAR_TRAJECTORY
+    n_steps, dt = 1000, 0.01
+    od = OverdampedLangevin(gamma=1.0, kT=0.15).to(DEVICE)
+    x0 = torch.tensor([-0.7], device=DEVICE)
+    traj = run_sim(od, x0, n_steps, dt)
+    return (np.linspace(0, 1, n_steps+1), traj[:, 0])
 
 @torch.no_grad()
 def get_exemplar_ode_trajectory():
     """Shared ODE trajectory (cached)."""
-    global _EXEMPLAR_ODE_TRAJECTORY
-    if _EXEMPLAR_ODE_TRAJECTORY is None:
-        n_steps, dt = 1000, 0.02
-        nh = NoseHoover(kT=0.15, mass=1.0, Q=2.5).to(DEVICE)
-        x0 = torch.tensor([-0.7], device=DEVICE)
-        traj_x, traj_v = run_sim(nh, x0, n_steps, dt)
-        _EXEMPLAR_ODE_TRAJECTORY = (np.linspace(0, 1, n_steps+1), traj_x[:, 0], traj_v[:, 0])
-    return _EXEMPLAR_ODE_TRAJECTORY
+    n_steps, dt = 1000, 0.04
+    nh = NoseHoover(kT=0.15, mass=1.0, Q=2.5).to(DEVICE)
+    x0 = torch.tensor([-0.7], device=DEVICE)
+    traj_x, traj_v = run_sim(nh, x0, n_steps, dt)
+    return (np.linspace(0, 1, n_steps+1), traj_x[:, 0], traj_v[:, 0])
 
 
 def clean_axis(ax):
