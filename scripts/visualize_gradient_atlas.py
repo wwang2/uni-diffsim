@@ -107,11 +107,15 @@ def draw_flow_arrow(ax, t, x, idx, direction='forward', color='black', size=10):
 # =============================================================================
 
 def plot_path(ax):
-    """Single path - remembers everything."""
+    """Single path - remembers everything. Pathwise/reparameterization gradient.
+    
+    Pathwise: E[∇_x O · ∂x_T/∂θ] - explicit Jacobian Φ(T,t)
+    Variance ~ exp(2λT) due to Lyapunov instability
+    """
     t, x = generate_sde_trajectory(seed=42, n_steps=120)
     ax.plot(t, x, color=ATLAS_COLORS['path_single'], lw=2, alpha=0.9)
     
-    # Mark memory chain
+    # Mark sensitivity chain - Jacobian Φ(T,t) propagates through history
     events = [20, 50, 80, 100]
     for ev in events:
         ax.scatter(t[ev], x[ev], s=40, color=ATLAS_COLORS['arrow_bwd'], zorder=10)
@@ -122,13 +126,22 @@ def plot_path(ax):
                                    lw=1.2, ls='--', connectionstyle='arc3,rad=0.15'))
     
     ax.set_title('PATH', fontsize=10, fontweight='bold', color=ATLAS_COLORS['path_single'], pad=3)
+    # Show the pathwise formula
     ax.text(0.5, 0.02, '"remembers"', transform=ax.transAxes, ha='center', fontsize=8,
             style='italic', color=ATLAS_COLORS['annotation'])
     clean_axis(ax)
 
 
 def plot_ensemble(ax):
-    """Ensemble - forgets history."""
+    """Ensemble - forgets history. Score function/REINFORCE gradient.
+    
+    REINFORCE: E[O · ∇_θ log p(τ)] - score function estimator
+    Variance ~ T (Itô isometry) - much better than exp(2λT)!
+    
+    KEY: Malliavin IBP shows PATH ↔ ENSEMBLE are equivalent:
+    E[∇_x O · ∂x_T/∂θ] = E[O · ∇_θ log p(τ)]
+    The Jacobian is "hidden" in the score!
+    """
     n_paths = 20
     for i in range(n_paths):
         t, x = generate_sde_trajectory(seed=100 + i, n_steps=120, noise_scale=0.35)
@@ -136,7 +149,7 @@ def plot_ensemble(ax):
         color = plt.cm.Blues(0.3 + 0.5 * weight)
         ax.plot(t, x, color=color, alpha=0.3 + 0.4 * weight, lw=1)
     
-    # Equilibrium distribution
+    # Equilibrium distribution - the ONLY thing that matters for ensemble view
     y_range = np.linspace(-2, 2, 80)
     eq_dist = np.exp(-0.5 * y_range**2)
     eq_dist = eq_dist / eq_dist.max() * 0.8
@@ -145,6 +158,7 @@ def plot_ensemble(ax):
     ax.text(t[-1] + 0.5, 0, '$\\pi$', fontsize=10, color=ATLAS_COLORS['equilibrium'], fontweight='bold')
     
     ax.set_title('ENSEMBLE', fontsize=10, fontweight='bold', color=ATLAS_COLORS['ensemble_base'], pad=3)
+    # Emphasize this is space average over distribution (history forgotten)
     ax.text(0.5, 0.02, '"forgets"', transform=ax.transAxes, ha='center', fontsize=8,
             style='italic', color=ATLAS_COLORS['annotation'])
     ax.set_xlim(t[0] - 0.3, t[-1] + 1.5)
@@ -235,26 +249,63 @@ def plot_ode(ax):
 # =============================================================================
 
 def plot_reinforce(ax):
-    """REINFORCE - score function estimator."""
-    n_paths = 12
+    """REINFORCE - equilibrium score function estimator.
+    
+    Uses score of the EQUILIBRIUM distribution: ∇_θ log π(x) = -β∇_θU(x)
+    Each sample gets weighted by its local score - no path memory needed.
+    """
+    n_paths = 15
+    
+    # Show samples from equilibrium distribution (endpoints only matter)
+    np.random.seed(200)
+    endpoints_x = np.random.randn(n_paths) * 0.8 + 0.5  # samples from π
+    endpoints_y = np.linspace(0.1, 0.9, n_paths)  # just for visual spread
+    
+    # Draw faded trajectories leading to endpoints (to show they don't matter)
     for i in range(n_paths):
         t, x = generate_sde_trajectory(seed=200 + i, n_steps=120, noise_scale=0.35)
-        reward = np.exp(-0.5 * (x[-1] - 0.8)**2)
-        color = plt.cm.RdYlGn(0.2 + 0.6 * reward)
-        ax.plot(t, x, color=color, alpha=0.4, lw=1.2)
-        ax.scatter(t[-1], x[-1], s=20 + 50 * reward, color=color, edgecolor='black', lw=0.3, zorder=5)
+        # Fade the trajectory - history doesn't matter for equilibrium score
+        ax.plot(t, x, color=ATLAS_COLORS['gray'], alpha=0.15, lw=0.8)
     
-    # Target region
-    ax.axhspan(0.3, 1.3, alpha=0.08, color=ATLAS_COLORS['equilibrium'])
+    # Equilibrium distribution on the right
+    y_range = np.linspace(-2, 2, 80)
+    eq_dist = np.exp(-0.5 * (y_range - 0.3)**2 / 0.6**2)
+    eq_dist = eq_dist / eq_dist.max() * 0.6
+    t_end = 6.0
+    ax.fill_betweenx(y_range, t_end, t_end + eq_dist, color=ATLAS_COLORS['reinforce'], alpha=0.2)
+    ax.plot(t_end + eq_dist, y_range, color=ATLAS_COLORS['reinforce'], lw=1.5, alpha=0.7)
+    
+    # Show samples ON the distribution with their local scores
+    sample_ys = np.array([-0.8, -0.2, 0.3, 0.6, 1.0, 1.4])
+    for y in sample_ys:
+        # Sample point on distribution
+        p_val = np.exp(-0.5 * (y - 0.3)**2 / 0.6**2)
+        p_val = p_val / np.exp(0) * 0.6  # normalize
+        ax.scatter(t_end + p_val * 0.5, y, s=60, color=ATLAS_COLORS['reinforce'], 
+                  edgecolor='white', linewidth=0.8, zorder=10)
+        
+        # Local score arrow: ∇_θ log π ∝ -∇_θU (points toward high probability)
+        score_direction = -(y - 0.3) * 0.15  # gradient of log π
+        if abs(score_direction) > 0.02:
+            ax.annotate('', xy=(t_end + p_val * 0.5, y + score_direction),
+                       xytext=(t_end + p_val * 0.5, y),
+                       arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['reinforce'], 
+                                      lw=1.2, alpha=0.7))
     
     ax.set_title('REINFORCE', fontsize=10, fontweight='bold', color=ATLAS_COLORS['reinforce'], pad=3)
-    ax.text(0.5, 0.02, '$R \\cdot \\nabla \\log p$', transform=ax.transAxes, ha='center', fontsize=8,
+    # Emphasize this is LOCAL score at each sample (no path integral)
+    ax.text(0.5, 0.02, '$R \\cdot \\nabla\\log p$', transform=ax.transAxes, ha='center', fontsize=8,
             color=ATLAS_COLORS['reinforce'])
+    ax.set_xlim(-0.3, t_end + 1.2)
     clean_axis(ax)
 
 
 def plot_girsanov(ax):
-    """Girsanov - path reweighting with M_T illustration."""
+    """Girsanov - path reweighting via Radon-Nikodym derivative.
+    
+    Computes PATH INTEGRAL: M_T = exp(∫₀ᵀ ... dW_t)
+    The weight accumulates along the ENTIRE trajectory - path memory required.
+    """
     t, x_ref = generate_sde_trajectory(seed=42, n_steps=120, drift_scale=0.05)
     ax.plot(t, x_ref, color=ATLAS_COLORS['gray'], lw=2.5, alpha=0.35, label='$\\mathbb{Q}$')
     
@@ -267,33 +318,34 @@ def plot_girsanov(ax):
         x_pert[i] = x_pert[i-1] - 0.15 * x_pert[i-1] * dt + 0.3 * np.sqrt(dt) * np.random.randn()
     ax.plot(t, x_pert, color=ATLAS_COLORS['girsanov'], lw=1.8, alpha=0.9, label='$\\mathbb{P}_\\theta$')
     
-    # Compute and show M_t accumulating (as growing markers)
-    # M_t = exp(∫ (b_θ - b_Q)/σ dW - 1/2 ∫ ((b_θ - b_Q)/σ)² dt)
-    weight_pts = [0, 30, 60, 90, 119]
+    # Compute and show M_t ACCUMULATING along the path (key visual!)
+    # M_t = exp(∫₀ᵗ (b_θ - b_Q)/σ dW - 1/2 ∫₀ᵗ ((b_θ - b_Q)/σ)² ds)
+    weight_pts = [0, 25, 50, 75, 100, 119]
     M_values = [1.0]  # M_0 = 1
     for i in range(1, len(weight_pts)):
-        # Simplified: M grows with drift difference accumulation
-        drift_diff_accum = np.sum(np.abs(x_pert[:weight_pts[i]] - x_ref[:weight_pts[i]])) * 0.02
-        M_values.append(np.exp(drift_diff_accum * 0.3))
+        # M accumulates along path - this is a PATH INTEGRAL
+        drift_diff_accum = np.sum(np.abs(x_pert[:weight_pts[i]] - x_ref[:weight_pts[i]])) * 0.015
+        M_values.append(np.exp(drift_diff_accum * 0.4))
     
     # Normalize for visualization
     M_values = np.array(M_values)
-    M_normalized = (M_values - M_values.min()) / (M_values.max() - M_values.min())
+    M_normalized = (M_values - M_values.min()) / (M_values.max() - M_values.min() + 0.01)
     
-    # Draw M_t as growing circles along the perturbed path
+    # Draw M_t as GROWING circles to show accumulation
     for i, pt in enumerate(weight_pts):
-        size = 15 + 60 * M_normalized[i]
+        size = 12 + 55 * M_normalized[i]
         ax.scatter(t[pt], x_pert[pt], s=size, color=ATLAS_COLORS['girsanov'], 
                   edgecolor='white', linewidth=0.8, zorder=10, alpha=0.8)
     
-    # Draw bracket showing M_T at the end
-    ax.annotate('', xy=(t[-1] + 0.3, x_pert[-1] + 0.15),
-                xytext=(t[-1] + 0.3, x_pert[-1] - 0.15),
+    # Draw bracket showing final M_T
+    ax.annotate('', xy=(t[-1] + 0.3, x_pert[-1] + 0.2),
+                xytext=(t[-1] + 0.3, x_pert[-1] - 0.2),
                 arrowprops=dict(arrowstyle=']-[', color=ATLAS_COLORS['girsanov'], lw=1.5))
     ax.text(t[-1] + 0.5, x_pert[-1], '$M_T$', fontsize=9, color=ATLAS_COLORS['girsanov'],
            fontweight='bold', va='center')
     
     ax.set_title('GIRSANOV', fontsize=10, fontweight='bold', color=ATLAS_COLORS['girsanov'], pad=3)
+    # Emphasize this is a PATH INTEGRAL (Radon-Nikodym derivative)
     ax.text(0.5, 0.02, '$M_T = \\frac{d\\mathbb{P}_\\theta}{d\\mathbb{Q}}$', 
             transform=ax.transAxes, ha='center', fontsize=8, color=ATLAS_COLORS['girsanov'])
     ax.set_xlim(t[0] - 0.2, t[-1] + 1.0)
@@ -305,32 +357,55 @@ def plot_girsanov(ax):
 # =============================================================================
 
 def plot_fine(ax):
-    """Fine-grained: Maximum Likelihood - match individual samples."""
-    # Generate model samples
-    n_model = 15
+    """Fine-grained: Maximum Likelihood - simulation guided toward data configurations.
+    
+    Shows trajectories being "pulled" toward data points (target configurations).
+    The gradient is: E_data[∇U] - E_sim[∇U] (contrastive divergence).
+    """
     np.random.seed(300)
     
-    # Data points (target)
-    data_x = np.array([0.3, 0.8, 1.2, 1.6, 2.1, 2.5, 3.0, 3.4, 3.9, 4.3])
-    data_y = np.sin(data_x * 0.8) * 0.8 + np.random.randn(len(data_x)) * 0.15
+    # Generate simulation trajectories
+    n_traj = 12
+    for i in range(n_traj):
+        t, x = generate_sde_trajectory(seed=300 + i, n_steps=100, noise_scale=0.32)
+        ax.plot(t, x, color=ATLAS_COLORS['fine'], alpha=0.2, lw=0.8)
     
-    # Model samples (from simulation)
-    for i in range(n_model):
-        t, x = generate_sde_trajectory(seed=300 + i, n_steps=80, noise_scale=0.3)
-        # Fade based on distance to show "matching"
-        ax.plot(t * 0.8, x * 0.6, color=ATLAS_COLORS['fine'], alpha=0.2, lw=0.8)
+    # Data points (target configurations) - shown at the END of trajectory space
+    # These are the x^data we want to maximize likelihood of
+    data_targets = np.array([-0.6, 0.1, 0.5, 0.9, 1.3])
+    t_end = 5.0  # end of trajectory
     
-    # Data points highlighted
-    ax.scatter(data_x * 0.8, data_y, s=50, color=ATLAS_COLORS['data'], 
-              edgecolor='black', linewidth=0.8, zorder=10, marker='o')
+    for y_data in data_targets:
+        # Data point marker (yellow circle)
+        ax.scatter(t_end, y_data, s=70, color=ATLAS_COLORS['data'], 
+                  edgecolor='black', linewidth=1, zorder=10, marker='o')
     
-    # Arrows from model to data (showing per-sample matching)
-    for i in range(0, len(data_x), 2):
-        ax.annotate('', xy=(data_x[i] * 0.8, data_y[i]),
-                   xytext=(data_x[i] * 0.8, data_y[i] - 0.4),
-                   arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['fine'], 
-                                  lw=1, alpha=0.6))
+    # Show model distribution p_θ at the end (where simulation lands)
+    y_range = np.linspace(-2, 2, 80)
+    # Current model distribution (slightly misaligned with data)
+    model_dist = np.exp(-0.5 * (y_range - 0.2)**2 / 0.7**2)
+    model_dist = model_dist / model_dist.max() * 0.6
+    ax.fill_betweenx(y_range, t_end + 0.1, t_end + 0.1 + model_dist, 
+                     color=ATLAS_COLORS['fine'], alpha=0.3)
+    ax.plot(t_end + 0.1 + model_dist, y_range, color=ATLAS_COLORS['fine'], lw=1.2, alpha=0.7)
     
+    # Arrows from model distribution toward data points (showing gradient direction)
+    # This is the "contrastive" part: push probability toward data
+    for y_data in data_targets[1:4]:  # show a few arrows
+        # Arrow from current model peak toward data
+        model_y = 0.2  # current model mean
+        if abs(y_data - model_y) > 0.2:
+            ax.annotate('', xy=(t_end - 0.3, y_data),
+                       xytext=(t_end - 0.3, model_y + 0.3 * np.sign(y_data - model_y)),
+                       arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['fine'], 
+                                      lw=1.3, alpha=0.7))
+    
+    # Labels
+    ax.text(t_end + 0.8, 1.0, '$p_\\theta$', fontsize=8, color=ATLAS_COLORS['fine'], fontweight='bold')
+    ax.text(t_end + 0.15, -1.5, '$x^{\\mathrm{data}}$', fontsize=8, color=ATLAS_COLORS['data'])
+    
+    ax.set_xlim(-0.3, t_end + 1.3)
+    ax.set_ylim(-2, 2)
     ax.set_title('FINE (ML)', fontsize=10, fontweight='bold', color=ATLAS_COLORS['fine'], pad=3)
     ax.text(0.5, 0.02, '$-\\log p_\\theta(x^{\\mathrm{data}})$', 
             transform=ax.transAxes, ha='center', fontsize=8, color=ATLAS_COLORS['fine'])
@@ -388,12 +463,12 @@ def main():
     gs = fig.add_gridspec(2, 5, hspace=0.25, wspace=0.12,
                           left=0.03, right=0.98, top=0.82, bottom=0.08)
     
-    # Column labels
+    # Column labels (updated IV to clarify the distinction)
     col_info = [
         ('I', 'Path vs Ensemble'),
         ('II', 'Forward vs Backward'),
         ('III', 'SDE vs ODE'),
-        ('IV', 'Score vs Reweight'),
+        ('IV', 'Eq. Score vs Path Reweight'),
         ('V', 'Fine vs Coarse'),
     ]
     
@@ -430,10 +505,47 @@ def main():
                 color=ATLAS_COLORS['annotation'], ha='center')
     
     # "vs" labels between rows (in the middle of each column)
-    for i in range(5):
+    # For other columns, just "vs"
+    for i in range(1, 5):
         x_pos = 0.11 + i * 0.19
         fig.text(x_pos, 0.47, 'vs', fontsize=8, color=ATLAS_COLORS['gray'],
                 ha='center', va='center', style='italic')
+    
+    # ==========================================================================
+    # Column I: Add IBP equivalence annotation between PATH and ENSEMBLE
+    # This is the key mathematical insight: Malliavin IBP shows they're equivalent
+    # ==========================================================================
+    ibp_color = '#8B5CF6'  # Purple for the IBP connection
+    
+    # Position for the IBP annotation (between the two panels of column I)
+    x_ibp = 0.11
+    
+    # Top formula (PATH): E[∇_x O · ∂x_T/∂θ] - the pathwise/reparameterization gradient
+    fig.text(x_ibp, 0.545, '$\\mathbb{E}[\\nabla_x \\mathcal{O} \\cdot \\partial_\\theta x_T]$', 
+             fontsize=7.5, ha='center', va='bottom', color=ATLAS_COLORS['path_single'],
+             fontweight='bold', bbox=dict(boxstyle='round,pad=0.15', facecolor='white', 
+                                          edgecolor=ATLAS_COLORS['path_single'], alpha=0.8, lw=0.5))
+    
+    # Large equivalence symbol with "Malliavin IBP" label
+    fig.text(x_ibp, 0.47, '≡', fontsize=16, ha='center', va='center', 
+             color=ibp_color, fontweight='bold')
+    fig.text(x_ibp + 0.055, 0.47, 'Malliavin\n   IBP', fontsize=6, ha='left', va='center', 
+             color=ibp_color, fontweight='bold', linespacing=0.9)
+    
+    # Bottom formula (ENSEMBLE): E[O · ∇_θ log p(τ)] - the score/REINFORCE gradient
+    fig.text(x_ibp, 0.395, '$\\mathbb{E}[\\mathcal{O} \\cdot \\nabla_\\theta \\log p(\\tau)]$', 
+             fontsize=7.5, ha='center', va='top', color=ATLAS_COLORS['ensemble_base'],
+             fontweight='bold', bbox=dict(boxstyle='round,pad=0.15', facecolor='white', 
+                                          edgecolor=ATLAS_COLORS['ensemble_base'], alpha=0.8, lw=0.5))
+    
+    # Variance comparison - the KEY practical difference!
+    # PATH has exponential variance (Lyapunov), ENSEMBLE has linear variance (Itô)
+    fig.text(x_ibp + 0.085, 0.535, 'var $\\sim e^{2\\lambda T}$', 
+             fontsize=6.5, ha='left', va='center', color=ATLAS_COLORS['arrow_bwd'], 
+             style='italic')
+    fig.text(x_ibp + 0.085, 0.405, 'var $\\sim T$', 
+             fontsize=6.5, ha='left', va='center', color=ATLAS_COLORS['equilibrium'], 
+             style='italic')
     
     # Main title
     fig.suptitle('The Gradient Method Atlas', fontsize=13, fontweight='bold',
