@@ -133,6 +133,79 @@ class OverdampedLangevin(Integrator):
         return result[0]
 
 
+class PreconditionedOverdampedLangevin(Integrator):
+    """Overdamped Langevin dynamics with anisotropic mass/mobility matrix.
+
+    dx = -M⁻¹∇U(x) dt + √(2kT M⁻¹) dW
+
+    We parameterize M⁻¹ (mobility) as D = R Rᵀ to ensure positive definiteness.
+    R is a learnable parameter matrix.
+
+    Args:
+        dim: Dimension of the system.
+        kT: Thermal energy. Differentiable parameter.
+        R: Preconditioning matrix factor. If None, initialized to identity.
+           Shape (dim, dim). Differentiable parameter.
+    """
+
+    def __init__(self, dim: int, kT: float = 1.0, R: torch.Tensor | None = None):
+        super().__init__()
+        self.kT = nn.Parameter(torch.tensor(kT))
+        self.dim = dim
+
+        if R is None:
+            R = torch.eye(dim)
+
+        if R.shape != (dim, dim):
+            raise ValueError(f"R must be shape ({dim}, {dim}), got {R.shape}")
+
+        self.R = nn.Parameter(R)
+
+    @property
+    def diffusion_matrix(self) -> torch.Tensor:
+        """Mobility/Diffusion matrix D = R Rᵀ (equivalent to M⁻¹)."""
+        return self.R @ self.R.T
+
+    @property
+    def mass_matrix(self) -> torch.Tensor:
+        """Mass/Friction matrix M = (R Rᵀ)⁻¹."""
+        return torch.linalg.inv(self.diffusion_matrix)
+
+    @property
+    def inv_mass_matrix(self) -> torch.Tensor:
+        """Inverse mass matrix M⁻¹ = R Rᵀ."""
+        return self.diffusion_matrix
+
+    def step(self, x: torch.Tensor, force_fn: ForceFunc, dt: float | torch.Tensor) -> torch.Tensor:
+        """Single integration step. Returns new positions."""
+        force = force_fn(x)  # (..., dim)
+
+        # Drift: D * F = (R Rᵀ) F
+        # Note: force is (..., dim). We treat it as a column vector per sample for matrix mult.
+        # But in PyTorch (..., dim) is row vectors.
+        # drift = (D @ force.T).T = force @ D.T = force @ D (since D symmetric)
+        D = self.diffusion_matrix
+        drift = force @ D
+
+        # Noise: √(2kT) * R * ξ
+        # ξ ~ N(0, I)
+        # noise = √(2kT) * (R @ ξ.T).T = √(2kT) * ξ @ R.T
+        xi = torch.randn_like(x)
+        noise_scale = torch.sqrt(2 * self.kT * dt)
+        noise = noise_scale * (xi @ self.R.T)
+
+        return x + drift * dt + noise
+
+    def run(self, x0: torch.Tensor, force_fn: ForceFunc, dt: float | torch.Tensor,
+            n_steps: int, store_every: int = 1, final_only: bool = False) -> torch.Tensor:
+        """Run trajectory. Returns (n_stored, ..., dim)."""
+        state = (x0,)
+        step_fn = lambda x: self.step(x, force_fn, dt)
+
+        result = self._integrate(state, step_fn, n_steps, store_every, final_only)
+        return result[0]
+
+
 class BAOAB(Integrator):
     """BAOAB splitting for underdamped Langevin dynamics.
     
