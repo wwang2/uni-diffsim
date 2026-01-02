@@ -708,6 +708,55 @@ class GLE(Integrator):
         return self._integrate(state, step_fn, n_steps, store_every, final_only, store_indices=[0, 1])
 
 
+class Lorenz63(Integrator):
+    """Lorenz 63 chaotic system.
+
+    dx/dt = sigma * (y - x)
+    dy/dt = x * (rho - z) - y
+    dz/dt = x * y - beta * z
+
+    Implemented using RK4 integration.
+    State x has shape (..., 3).
+
+    Args:
+        sigma, rho, beta: System parameters (differentiable).
+    """
+
+    def __init__(self, sigma: float = 10.0, rho: float = 28.0, beta: float = 8.0/3.0):
+        super().__init__()
+        self.sigma = nn.Parameter(torch.tensor(sigma))
+        self.rho = nn.Parameter(torch.tensor(rho))
+        self.beta = nn.Parameter(torch.tensor(beta))
+
+    def vector_field(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute dx/dt."""
+        # x: (..., 3) -> [x, y, z]
+        x_c, y_c, z_c = x[..., 0], x[..., 1], x[..., 2]
+
+        dx = self.sigma * (y_c - x_c)
+        dy = x_c * (self.rho - z_c) - y_c
+        dz = x_c * y_c - self.beta * z_c
+
+        return torch.stack([dx, dy, dz], dim=-1)
+
+    def step(self, x: torch.Tensor, dt: float) -> torch.Tensor:
+        """RK4 step."""
+        k1 = self.vector_field(x)
+        k2 = self.vector_field(x + 0.5 * dt * k1)
+        k3 = self.vector_field(x + 0.5 * dt * k2)
+        k4 = self.vector_field(x + dt * k3)
+
+        return x + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+
+    def run(self, x0: torch.Tensor, dt: float, n_steps: int,
+            store_every: int = 1, final_only: bool = False, **kwargs) -> torch.Tensor:
+        """Run trajectory. Returns (n_stored, ..., 3)."""
+        # Ignore force_fn if passed in kwargs
+        state = (x0,)
+        step_fn = lambda x: self.step(x, dt)
+        return self._integrate(state, step_fn, n_steps, store_every, final_only)[0]
+
+
 def kinetic_energy(v: torch.Tensor, mass: float = 1.0) -> torch.Tensor:
     """Compute kinetic energy. v: (..., dim) -> (...)."""
     return 0.5 * mass * (v**2).sum(dim=-1)
@@ -778,6 +827,13 @@ if __name__ == "__main__":
     traj_x, traj_v = gle.run(x0, v0, force_fn, dt, n_steps)
     assert traj_x.shape[0] == n_steps + 1
     print(f"  GLE: OK, final x mean = {traj_x[-1].mean():.3f}")
+
+    # Lorenz63
+    lorenz = Lorenz63()
+    x0_lorenz = torch.randn(10, 3)
+    traj_lorenz = lorenz.run(x0_lorenz, dt=0.01, n_steps=100)
+    assert traj_lorenz.shape == (101, 10, 3)
+    print(f"  Lorenz63: OK, final x mean = {traj_lorenz[-1].mean():.3f}")
     
     # Test gradient flow
     x0_grad = torch.randn(5, 2, requires_grad=True)
