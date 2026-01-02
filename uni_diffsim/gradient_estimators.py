@@ -236,71 +236,30 @@ class ReinforceEstimator(nn.Module):
         else:
             O_centered = O - O_mean
 
-        # Compute per-sample gradients dU_i/dθ
-        grads = {}
+        # Compute surrogate loss to handle both terms simultaneously:
+        # 1. Pathwise derivative: ⟨∇_θ O⟩
+        # 2. Score function term: -β ⟨(O - b) ∇_θ U⟩
 
-        # Check if O depends on parameters (gradient contribution ⟨∂O/∂θ⟩)
-        grads_O = {}
-        if O.requires_grad:
-            for name, param in self.potential.named_parameters():
-                if param.requires_grad:
-                    # Compute ⟨∂O/∂θ⟩ = ∂(ΣO)/∂θ / n
-                    grad_O = torch.autograd.grad(
-                        O.sum(), param,
-                        create_graph=True, retain_graph=True, allow_unused=True
-                    )[0]
-                    if grad_O is not None:
-                        grads_O[name] = grad_O / n_samples
+        # L = (O - β * (O_centered.detach() * U)).mean()
+        # ∇L = ⟨∇O⟩ - β ⟨(O-b) ∇U⟩  (using chain rule for U term)
 
-        # Compute energy and its gradients
         U = self.potential.energy(samples_flat)
+        surrogate_loss = (O - self.beta * (O_centered.detach() * U)).mean()
 
+        # Compute gradients all at once
+        grads = {}
         for name, param in self.potential.named_parameters():
-            if not param.requires_grad:
-                continue
+            if param.requires_grad:
+                grad = torch.autograd.grad(
+                    surrogate_loss,
+                    param,
+                    create_graph=True,
+                    retain_graph=True,
+                    allow_unused=True
+                )[0]
 
-            # Compute dU/dθ via autograd
-            # Strategy: Compute ⟨O * dU/dθ⟩ using autograd's chain rule
-            # d/dθ ⟨O * U⟩ = ⟨O * dU/dθ⟩ (when O doesn't depend on θ)
-
-            # Weighted sum: sum(O * U)
-            # IMPORTANT: Detach O_centered!
-            # The REINFORCE term is -β Cov(O, dU/dθ).
-            # If O depends on θ, we handle that separately via ⟨∂O/∂θ⟩.
-            # In the covariance term, O acts as a fixed weight.
-            weighted_U = (O_centered.detach() * U).sum()
-
-            # Gradient of weighted sum
-            grad_weighted = torch.autograd.grad(
-                weighted_U,
-                param,
-                create_graph=True,
-                retain_graph=True,
-                allow_unused=True
-            )[0]
-
-            # Also compute ⟨dU/dθ⟩ for the baseline correction (if needed explicitly)
-            # Actually, O_centered already handles the baseline implicitly:
-            # sum((O - b) * dU/dθ) = sum(O * dU/dθ) - b * sum(dU/dθ)
-            # This is exactly what we want.
-
-            # Combine terms: ∇⟨O⟩ = ⟨∂O/∂θ⟩ - β Cov(O, ∇U)
-            grad_val = torch.zeros_like(param)
-            has_contribution = False
-
-            if grad_weighted is not None:
-                # REINFORCE gradient: -β * [⟨(O - b) * dU/dθ⟩]
-                grad_reinforce = -self.beta * (grad_weighted / n_samples)
-                grad_val = grad_val + grad_reinforce
-                has_contribution = True
-
-            if name in grads_O:
-                # Add ⟨∂O/∂θ⟩
-                grad_val = grad_val + grads_O[name]
-                has_contribution = True
-
-            if has_contribution:
-                grads[name] = grad_val
+                if grad is not None:
+                    grads[name] = grad
 
         return grads
 
