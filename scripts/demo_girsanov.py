@@ -80,7 +80,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from uni_diffsim import OverdampedLangevin, Harmonic, DoubleWell, AsymmetricDoubleWell
-from uni_diffsim.gradient_estimators import GirsanovEstimator, ReinforceEstimator
+from uni_diffsim.gradient_estimators import PathReweightingEstimator, ReinforceEstimator
 from uni_diffsim.plotting import apply_style, COLORS, LW, MS
 
 apply_style()
@@ -176,7 +176,7 @@ def experiment_variance_vs_length():
             
             # Girsanov
             potential_gir = Harmonic(k=k)
-            estimator = GirsanovEstimator(potential_gir, sigma=np.sqrt(2*kT))
+            estimator = PathReweightingEstimator(potential_gir, sigma=np.sqrt(2*kT))
             traj_gir = traj.detach().transpose(0, 1)  # (n_walkers, n_steps, 1)
             
             # Observable: time-averaged ⟨x²⟩ per trajectory
@@ -259,7 +259,7 @@ def experiment_observable_types():
             final_bptt.append(grad.item())
             
             potential_gir = DoubleWell(barrier_height=b)
-            estimator = GirsanovEstimator(potential_gir, sigma=np.sqrt(2*kT))
+            estimator = PathReweightingEstimator(potential_gir, sigma=np.sqrt(2*kT))
             traj_gir = traj.detach().transpose(0, 1)
             obs_final = lambda t: soft_indicator(t[:, -1, 0], 0.0, 0.1)
             grads = estimator.estimate_gradient(traj_gir, observable=obs_final, dt=dt)
@@ -273,7 +273,7 @@ def experiment_observable_types():
             avg_bptt.append(grad_avg.item())
             
             potential_gir2 = DoubleWell(barrier_height=b)
-            estimator2 = GirsanovEstimator(potential_gir2, sigma=np.sqrt(2*kT))
+            estimator2 = PathReweightingEstimator(potential_gir2, sigma=np.sqrt(2*kT))
             traj_gir2 = traj2.detach().transpose(0, 1)
             obs_avg = lambda t: t.mean(dim=(1, 2))
             grads2 = estimator2.estimate_gradient(traj_gir2, observable=obs_avg, dt=dt)
@@ -287,7 +287,7 @@ def experiment_observable_types():
             fpt_bptt.append(grad_fpt.item())
             
             potential_gir3 = DoubleWell(barrier_height=b)
-            estimator3 = GirsanovEstimator(potential_gir3, sigma=np.sqrt(2*kT))
+            estimator3 = PathReweightingEstimator(potential_gir3, sigma=np.sqrt(2*kT))
             traj_gir3 = traj3.detach().transpose(0, 1)
             obs_fpt = lambda t: soft_fpt(t.transpose(0, 1), threshold=0.0, sigma=0.1, dt=dt)
             grads3 = estimator3.estimate_gradient(traj_gir3, observable=obs_fpt, dt=dt)
@@ -357,7 +357,7 @@ def experiment_score_distribution():
         traj = integrator.run(x0, potential.force, dt=dt, n_steps=n_steps)
         
         # Compute log scores
-        estimator = GirsanovEstimator(potential, sigma=np.sqrt(2*kT))
+        estimator = PathReweightingEstimator(potential, sigma=np.sqrt(2*kT))
         traj_for_score = traj  # (n_steps, n_walkers, 1)
         log_scores = estimator.compute_log_path_score(traj_for_score, dt)
         
@@ -418,7 +418,7 @@ def experiment_effective_samples():
         traj = integrator.run(x0, potential.force, dt=dt, n_steps=n_steps)
         
         # Compute log scores
-        estimator = GirsanovEstimator(potential, sigma=np.sqrt(2*kT))
+        estimator = PathReweightingEstimator(potential, sigma=np.sqrt(2*kT))
         log_scores = estimator.compute_log_path_score(traj, dt)
         
         # Compute importance weights (self-normalized)
@@ -501,7 +501,7 @@ def experiment_girsanov_vs_reinforce():
             
             # === Girsanov ===
             potential_gir = Harmonic(k=1.0)
-            estimator_gir = GirsanovEstimator(potential_gir, sigma=np.sqrt(2*kT))
+            estimator_gir = PathReweightingEstimator(potential_gir, sigma=np.sqrt(2*kT))
             traj_gir = traj.detach().transpose(0, 1)
             obs_gir = lambda t: (t[:, burn_in:]**2).mean(dim=(1, 2))
             grads_gir = estimator_gir.estimate_gradient(traj_gir, observable=obs_gir, dt=dt)
@@ -603,7 +603,7 @@ def experiment_variance_reduction():
             for method in methods:
                 vr = None if method == 'none' else method
                 potential = Harmonic(k=1.0)
-                estimator = GirsanovEstimator(
+                estimator = PathReweightingEstimator(
                     potential, 
                     sigma=np.sqrt(2*kT),
                     variance_reduction=vr,
@@ -723,7 +723,7 @@ def experiment_optimization():
         
         # Girsanov gradient
         potential_gir = Harmonic(k=k_gir)
-        estimator = GirsanovEstimator(potential_gir, sigma=np.sqrt(2*kT))
+        estimator = PathReweightingEstimator(potential_gir, sigma=np.sqrt(2*kT))
         traj_gir = traj.transpose(0, 1)
         obs_gir = lambda t: (t**2).mean(dim=(1, 2))
         grads = estimator.estimate_gradient(traj_gir, observable=obs_gir, dt=dt)
