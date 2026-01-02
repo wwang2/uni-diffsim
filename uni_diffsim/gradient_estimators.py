@@ -2181,33 +2181,64 @@ class ForwardSensitivityEstimator(nn.Module):
 
         This implementation uses jacfwd on the entire run, which is convenient 
         but memory-intensive for long trajectories.
+
+        To differentiate w.r.t 'dt', pass it as a keyword argument 'dt' that requires grad.
         """
         from torch.func import jacfwd
 
         params = dict(self.integrator.named_parameters())
         target_params = {k: params[k] for k in self.param_names if k in params}
         
-        if not target_params:
-            raise ValueError(f"No target parameters found in integrator: {self.param_names}")
+        # Check for differentiable dt in kwargs
+        dt_val = kwargs.get('dt')
+        diff_args = {}
+        if isinstance(dt_val, torch.Tensor) and dt_val.requires_grad:
+             diff_args['dt'] = dt_val
+             # Remove dt from kwargs passed to closure, so we can inject it
+             # Note: we copy kwargs to avoid modifying input
+             kwargs = kwargs.copy()
+             del kwargs['dt']
+
+        # Combine inputs to differentiate
+        diff_inputs = {**target_params, **diff_args}
+
+        if not diff_inputs:
+            raise ValueError(f"No target parameters found (checked {self.param_names} and differentiable 'dt')")
         
         other_params = {k: v for k, v in params.items() if k not in target_params}
 
-        def wrapper(p_subset):
-            full_params = {**other_params, **p_subset}
-            return functional_call(self.integrator, full_params, args=args, kwargs=kwargs, strict=False)
+        def wrapper(inputs):
+            # Split inputs back into params and args
+            p_subset = {k: v for k, v in inputs.items() if k in target_params}
+            a_subset = {k: v for k, v in inputs.items() if k in diff_args}
 
-        jac_output = jacfwd(wrapper)(target_params)
+            full_params = {**other_params, **p_subset}
+
+            # Inject dynamic args back
+            current_kwargs = kwargs.copy()
+            current_kwargs.update(a_subset) # Puts 'dt' back in if present
+
+            return functional_call(self.integrator, full_params, args=args, kwargs=current_kwargs, strict=False)
+
+        jac_output = jacfwd(wrapper)(diff_inputs)
         
         with torch.no_grad():
              if hasattr(self.integrator, 'forward'):
-                 primal = self.integrator(*args, **kwargs)
+                 # Reconstruct kwargs with dt for primal run
+                 run_kwargs = kwargs.copy()
+                 if 'dt' in diff_args:
+                     run_kwargs['dt'] = diff_args['dt']
+                 primal = self.integrator(*args, **run_kwargs)
              else:
-                 primal = self.integrator.run(*args, **kwargs)
+                 run_kwargs = kwargs.copy()
+                 if 'dt' in diff_args:
+                     run_kwargs['dt'] = diff_args['dt']
+                 primal = self.integrator.run(*args, **run_kwargs)
                  
         return primal, jac_output
 
     def forward_sensitivity_online(self, x0: torch.Tensor, v0: Optional[torch.Tensor], 
-                                 force_fn: Callable, dt: float, n_steps: int, 
+                                 force_fn: Callable, dt: float | torch.Tensor, n_steps: int,
                                  store_every: int = 1) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Optimized online forward sensitivity propagation.
         
@@ -2224,43 +2255,57 @@ class ForwardSensitivityEstimator(nn.Module):
         target_params = {k: params[k] for k in target_names}
         other_params = {k: v for k, v in params.items() if k not in target_params}
         
+        # Check if dt requires grad
+        dt_requires_grad = isinstance(dt, torch.Tensor) and dt.requires_grad
+
         # 1. Define the step function
-        # We need a function that takes target_params and returns next state
-        def step_func(p_target, state_tuple):
+        # We need a function that takes target_params AND dt and returns next state
+        def step_func(p_target, state_tuple, dt_val):
             p_full = {**other_params, **p_target}
             # Unpack state
             if len(state_tuple) == 3: # NoseHoover (x, v, alpha)
                 x, v, alpha = state_tuple
-                return functional_call(self.integrator, p_full, (x, v, alpha, force_fn, dt))
+                return functional_call(self.integrator, p_full, (x, v, alpha, force_fn, dt_val))
             else: # Standard (x, v)
                 x, v = state_tuple
-                return functional_call(self.integrator, p_full, (x, v, force_fn, dt))
+                return functional_call(self.integrator, p_full, (x, v, force_fn, dt_val))
 
         # 2. Setup for parallel sensitivity propagation
         # We use a flattened view for the basis
         flat_params = torch.cat([p.view(-1) for p in target_params.values()])
         n_params = flat_params.numel()
         
+        # If dt requires grad, add 1 dimension for it
+        total_dim = n_params + (1 if dt_requires_grad else 0)
+
         # Initial state
         state = (x0, v0) if v0 is not None else (x0,)
 
         # Jacobians: initialized to zero
-        # Sensitivities have shape (n_params, *state_shape)
-        state_jacs = tuple(torch.zeros(n_params, *s.shape, device=s.device, dtype=s.dtype) for s in state)
+        # Sensitivities have shape (total_dim, *state_shape)
+        state_jacs = tuple(torch.zeros(total_dim, *s.shape, device=s.device, dtype=s.dtype) for s in state)
 
-        # Flattened basis: (n_params, target_params_dict)
+        # Flattened basis: (total_dim, target_params_dict) + dt_tangent
         # This allows us to vmap over the parameter dimension
-        def get_tangent_dict(idx):
-            d = {}
+        def get_tangents(idx):
+            # Param tangents
+            d_params = {}
             curr = 0
             for k, p in target_params.items():
                 size = p.numel()
                 t = torch.zeros_like(p)
-                if idx >= curr and idx < curr + size:
+                # If idx is within this parameter's range
+                if idx < n_params and idx >= curr and idx < curr + size:
                     t.view(-1)[idx - curr] = 1.0
-                d[k] = t
+                d_params[k] = t
                 curr += size
-            return d
+
+            # dt tangent
+            d_dt = torch.tensor(0.0, device=x0.device)
+            if dt_requires_grad and idx == n_params:
+                d_dt = torch.tensor(1.0, device=x0.device)
+
+            return d_params, d_dt
 
         # 3. Propagation Loop
         # J_next = JVP(step, (params, state), (param_tangent, J_curr))
@@ -2276,12 +2321,15 @@ class ForwardSensitivityEstimator(nn.Module):
         for step_idx in range(1, n_steps + 1):
             # Propagate all n_params sensitivities in parallel using vmap(jvp)
             def jvp_wrapper(idx):
-                p_tangent = get_tangent_dict(idx)
+                p_tangent, dt_tangent = get_tangents(idx)
                 state_tangent = tuple(j[idx] for j in curr_jacs)
-                return jvp(step_func, (target_params, curr_state), (p_tangent, state_tangent))
+                # Primal inputs: target_params, curr_state, dt
+                # Tangents: p_tangent, state_tangent, dt_tangent
+                return jvp(step_func, (target_params, curr_state, dt), (p_tangent, state_tangent, dt_tangent))
             
             # This computes (new_state, new_jacs)
-            res = vmap(jvp_wrapper)(torch.arange(n_params, device=x0.device))
+            # vmap over total_dim
+            res = vmap(jvp_wrapper)(torch.arange(total_dim, device=x0.device))
             
             # res structure: ( (new_x, new_v), (jac_x, jac_v) )
             new_state_all = res[0]
@@ -2299,10 +2347,15 @@ class ForwardSensitivityEstimator(nn.Module):
         curr = 0
         for k, p in target_params.items():
             size = p.numel()
-            j = curr_jacs[0][curr:curr+size] # Position jacobian
+            j = curr_jacs[0][curr:curr+size] # Position jacobian slice
             final_jacs[k] = j.movedim(0, -1).reshape(*x0.shape, *p.shape)
             curr += size
             
+        if dt_requires_grad:
+            # Last element is dt sensitivity
+            j = curr_jacs[0][n_params]
+            final_jacs['dt'] = j # (..., dim) -> sensitivity of final x w.r.t dt
+
         return traj_states[0], final_jacs
 
 
