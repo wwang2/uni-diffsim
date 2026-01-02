@@ -1957,7 +1957,7 @@ class DiscreteAdjointNoseHoover(nn.Module):
             dt: Time step
             
         Returns:
-            (new_lambda_x, new_lambda_v, new_lambda_alpha, grad_kT, grad_mass, grad_Q)
+            (new_lambda_x, new_lambda_v, new_lambda_alpha, grad_kT, grad_mass, grad_Q, grad_dt)
         """
         device = x.device
         ndof = x.shape[-1]
@@ -1989,6 +1989,7 @@ class DiscreteAdjointNoseHoover(nn.Module):
         grad_kT = torch.zeros((), device=device, dtype=kT.dtype)
         grad_mass = torch.zeros((), device=device, dtype=mass.dtype)
         grad_Q = torch.zeros((), device=device, dtype=Q.dtype)
+        grad_dt = torch.zeros((), device=device, dtype=x.dtype)
         
         lam_x = lambda_x.clone()
         lam_v = lambda_v.clone()
@@ -1997,18 +1998,27 @@ class DiscreteAdjointNoseHoover(nn.Module):
         # Adjoint of Step 9: α' = α₃ + (dt/4)(v₄² - ndof·kT)/Q
         lam_alpha3 = lam_alpha.clone()
         lam_v4 = lam_v + lam_alpha.unsqueeze(-1) * (dt / 2) * v4 / Q
-        grad_kT = grad_kT - (lam_alpha * (dt / 4) * ndof / Q).sum()
-        grad_Q = grad_Q - (lam_alpha * (dt / 4) * (v4_2 - ndof * kT) / (Q ** 2)).sum()
+
+        term = (lam_alpha * (v4_2 - ndof * kT) / Q)
+        grad_dt += (term / 4).sum()
+        grad_kT -= (lam_alpha * (dt / 4) * ndof / Q).sum()
+        grad_Q -= (lam_alpha * (dt / 4) * (v4_2 - ndof * kT) / (Q ** 2)).sum()
         
         # Adjoint of Step 8: v₄ = v₃ * exp(-α₃ * dt/2)
         lam_v3 = lam_v4 * exp_neg_a3
-        lam_alpha3 = lam_alpha3 - (dt / 2) * (lam_v4 * v4).sum(dim=-1)
+
+        term = (lam_v4 * v4 * (-alpha3.unsqueeze(-1) / 2))
+        grad_dt += term.sum()
+        lam_alpha3 -= (lam_v4 * v4 * (-dt / 2)).sum(dim=-1) # Fixed from previous: was just (dt/2)
         
         # Adjoint of Step 7: α₃ = α₂ + (dt/4)(v₃² - ndof·kT)/Q
         lam_alpha2 = lam_alpha3.clone()
         lam_v3 = lam_v3 + lam_alpha3.unsqueeze(-1) * (dt / 2) * v3 / Q
-        grad_kT = grad_kT - (lam_alpha3 * (dt / 4) * ndof / Q).sum()
-        grad_Q = grad_Q - (lam_alpha3 * (dt / 4) * (v3_2 - ndof * kT) / (Q ** 2)).sum()
+
+        term = (lam_alpha3 * (v3_2 - ndof * kT) / Q)
+        grad_dt += (term / 4).sum()
+        grad_kT -= (lam_alpha3 * (dt / 4) * ndof / Q).sum()
+        grad_Q -= (lam_alpha3 * (dt / 4) * (v3_2 - ndof * kT) / (Q ** 2)).sum()
         
         # Adjoint of Step 6: v₃ = v₂ + (dt/2) * F(x')/m
         lam_v2 = lam_v3.clone()
@@ -2017,13 +2027,18 @@ class DiscreteAdjointNoseHoover(nn.Module):
         vjp_x1 = torch.autograd.grad(F1_recompute, x_new_grad, grad_outputs=lam_v3,
                                       create_graph=False, retain_graph=False)[0]
         lam_x_from_v = vjp_x1 * (dt / 2) / mass
-        grad_mass = grad_mass - ((lam_v3 * F1).sum() * (dt / 2) / (mass ** 2))
+
+        term = (lam_v3 * F1 / mass)
+        grad_dt += (term / 2).sum()
+        grad_mass -= ((lam_v3 * F1).sum() * (dt / 2) / (mass ** 2))
         
         # Adjoint of Step 5: x' = x + dt * v₂
         lam_x_new = lam_x + lam_x_from_v
         lam_x_0 = lam_x_new.clone()
         lam_v2 = lam_v2 + dt * lam_x_new
         
+        grad_dt += (lam_x_new * v2_vec).sum()
+
         # Adjoint of Step 4: v₂ = v₁ + (dt/2) * F(x)/m
         lam_v1 = lam_v2.clone()
         x_grad = x.detach().requires_grad_(True)
@@ -2031,25 +2046,37 @@ class DiscreteAdjointNoseHoover(nn.Module):
         vjp_x0 = torch.autograd.grad(F0_recompute, x_grad, grad_outputs=lam_v2,
                                       create_graph=False, retain_graph=False)[0]
         lam_x_0 = lam_x_0 + vjp_x0 * (dt / 2) / mass
-        grad_mass = grad_mass - ((lam_v2 * F0).sum() * (dt / 2) / (mass ** 2))
+
+        term = (lam_v2 * F0 / mass)
+        grad_dt += (term / 2).sum()
+        grad_mass -= ((lam_v2 * F0).sum() * (dt / 2) / (mass ** 2))
         
         # Adjoint of Step 3: α₂ = α₁ + (dt/4)(v₁² - ndof·kT)/Q
         lam_alpha1 = lam_alpha2.clone()
         lam_v1 = lam_v1 + lam_alpha2.unsqueeze(-1) * (dt / 2) * v1 / Q
-        grad_kT = grad_kT - (lam_alpha2 * (dt / 4) * ndof / Q).sum()
-        grad_Q = grad_Q - (lam_alpha2 * (dt / 4) * (v1_2 - ndof * kT) / (Q ** 2)).sum()
+
+        term = (lam_alpha2 * (v1_2 - ndof * kT) / Q)
+        grad_dt += (term / 4).sum()
+        grad_kT -= (lam_alpha2 * (dt / 4) * ndof / Q).sum()
+        grad_Q -= (lam_alpha2 * (dt / 4) * (v1_2 - ndof * kT) / (Q ** 2)).sum()
         
         # Adjoint of Step 2: v₁ = v * exp(-α₁ * dt/2)
         lam_v_0 = lam_v1 * exp_neg_a1
-        lam_alpha1 = lam_alpha1 - (dt / 2) * (lam_v1 * v1).sum(dim=-1)
+
+        term = (lam_v1 * v1 * (-alpha1.unsqueeze(-1) / 2))
+        grad_dt += term.sum()
+        lam_alpha1 -= (lam_v1 * v1 * (-dt / 2)).sum(dim=-1) # Fixed: was (dt/2)
         
         # Adjoint of Step 1: α₁ = α + (dt/4)(v² - ndof·kT)/Q
         lam_alpha_0 = lam_alpha1.clone()
         lam_v_0 = lam_v_0 + lam_alpha1.unsqueeze(-1) * (dt / 2) * v / Q
-        grad_kT = grad_kT - (lam_alpha1 * (dt / 4) * ndof / Q).sum()
-        grad_Q = grad_Q - (lam_alpha1 * (dt / 4) * (v2 - ndof * kT) / (Q ** 2)).sum()
         
-        return lam_x_0, lam_v_0, lam_alpha_0, grad_kT, grad_mass, grad_Q
+        term = (lam_alpha1 * (v2 - ndof * kT) / Q)
+        grad_dt += (term / 4).sum()
+        grad_kT -= (lam_alpha1 * (dt / 4) * ndof / Q).sum()
+        grad_Q -= (lam_alpha1 * (dt / 4) * (v2 - ndof * kT) / (Q ** 2)).sum()
+
+        return lam_x_0, lam_v_0, lam_alpha_0, grad_kT, grad_mass, grad_Q, grad_dt
     
     def run(self, x0: torch.Tensor, v0: Optional[torch.Tensor],
             force_fn: Callable, dt: float, n_steps: int, store_every: int = 1
@@ -2100,14 +2127,18 @@ class DiscreteAdjointNoseHoover(nn.Module):
         grad_kT = torch.zeros((), device=device, dtype=self.kT.dtype)
         grad_mass = torch.zeros((), device=device, dtype=self.mass.dtype)
         grad_Q = torch.zeros((), device=device, dtype=self.Q.dtype)
+        grad_dt = torch.zeros((), device=device, dtype=traj_x.dtype)
         
         for t in range(T - 1, 0, -1):
-            lambda_x, lambda_v, lambda_alpha, d_kT, d_mass, d_Q = self.adjoint_step(
+            lambda_x, lambda_v, lambda_alpha, d_kT, d_mass, d_Q, d_dt = self.adjoint_step(
                 lambda_x, lambda_v, lambda_alpha,
                 traj_x[t - 1], traj_v[t - 1], traj_alpha[t - 1],
                 force_fn, dt
             )
-            grad_kT, grad_mass, grad_Q = grad_kT + d_kT, grad_mass + d_mass, grad_Q + d_Q
+            grad_kT = grad_kT + d_kT
+            grad_mass = grad_mass + d_mass
+            grad_Q = grad_Q + d_Q
+            grad_dt = grad_dt + d_dt
             
             if loss_grad_x[t - 1] is not None:
                 lambda_x = lambda_x + loss_grad_x[t - 1]
@@ -2115,7 +2146,7 @@ class DiscreteAdjointNoseHoover(nn.Module):
                 lambda_v = lambda_v + loss_grad_v[t - 1]
         
         return {
-            'kT': grad_kT, 'mass': grad_mass, 'Q': grad_Q,
+            'kT': grad_kT, 'mass': grad_mass, 'Q': grad_Q, 'dt': grad_dt,
             'x0': lambda_x, 'v0': lambda_v, 'alpha0': lambda_alpha
         }
 
