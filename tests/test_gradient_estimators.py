@@ -466,3 +466,11 @@ class TestEdgeCases:
         grads = estimator.estimate_gradient(samples)
 
         assert torch.isfinite(grads['k']).all()
+
+class TestBackwardCompatibility:
+    """Tests for backward compatibility aliases."""
+
+    def test_girsanov_estimator_alias(self):
+        """GirsanovEstimator should be an alias for PathReweightingEstimator."""
+        from uni_diffsim.gradient_estimators import GirsanovEstimator, PathReweightingEstimator
+        assert GirsanovEstimator is PathReweightingEstimator
