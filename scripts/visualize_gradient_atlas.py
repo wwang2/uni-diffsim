@@ -616,15 +616,30 @@ def plot_likelihood_ratio(ax):
 
 
 # =============================================================================
-# Row 5: DATA LIKELIHOOD vs OBSERVABLE MATCHING
+# Row 5: FINE-GRAINED (Data Likelihood) vs COARSE-GRAINED (Observable) LOSS
+# =============================================================================
+# 
+# KEY INSIGHT: Both are instances of the SAME gradient formula:
+#     ∇_θ L = -β Cov_π(O, ∇_θ U)
+# 
+# The difference is the LOSS FUNCTION (choice of what to match):
+#   - CD Loss: L = E_data[E] - E_model[E] → match full distribution
+#   - Observable Loss: L = (⟨O⟩ - target)² → match statistics
+# 
+# This is the "loss function perspective" on differentiable simulation.
+# Both losses lead to the same covariance gradient structure!
 # =============================================================================
 
 def plot_data_likelihood(ax):
-    """Data Likelihood: Maximum Likelihood with Contrastive Divergence.
+    """Contrastive Divergence Loss: L = E_data[E] - E_model[E]
     
-    Shows generated sample data at 4 different time slices to illustrate
-    ML training with contrastive divergence: matching data gradient by
-    comparing model samples vs data samples at each time point.
+    The CD loss directly compares energies at data vs model samples.
+    This is maximum likelihood training of energy-based models.
+    
+    Gradient: ∇_θ L = E_data[∇_θE] - E_model[∇_θE]
+    
+    Visual: Show data points (×) and model samples (○) with their energies,
+    emphasizing the energy difference that drives learning.
     """
     # Get reference trajectory for time axis
     t_ref, _ = get_exemplar_trajectory()
@@ -647,14 +662,12 @@ def plot_data_likelihood(ax):
         ax.plot(t, x_batch[:, i], color=ATLAS_COLORS['fine'], alpha=0.35, lw=0.8, zorder=3)
     
     # =====================================================================
-    # KEY: 4 TIME SLICES with generated data samples
-    # Shows contrastive divergence: model samples ↔ data samples
-    # Gradient = E_data[∇U] - E_model[∇U] (pushes model toward data)
+    # KEY: Data points (×) vs Model samples (○)
+    # CD Loss = E_data[E(x)] - E_model[E(x)]
     # =====================================================================
     time_slices = [0.15, 0.40, 0.65, 0.90]  # 4 time slices
     
-    # Generate "data" samples at each time slice (slightly different from model)
-    # In practice, these would come from real data
+    # Generate "data" samples at each time slice
     np.random.seed(123)
     data_per_slice = [
         np.array([-0.65, -0.55, 0.50]),       # t1: data near left well + one right
@@ -667,63 +680,27 @@ def plot_data_likelihood(ax):
         t_idx = int(frac * (len(t) - 1))
         t_slice = t[t_idx]
         
-        # Draw vertical time slice indicator
-        # ax.axvline(x=t_slice, color=ATLAS_COLORS['data'], alpha=0.3, ls='--', lw=1.0, zorder=1)
-        
-        # Get model samples at this time slice
-        model_samples = x_batch[t_idx, :]
-        
-        # Draw DATA samples (filled circles with black edge) - target distribution
+        # Draw DATA samples (×) - these have E_data
         for y_data in data_samples:
-            ax.scatter(t_slice, y_data, s=40, color="black", linewidth=0.8, zorder=12, marker='x')
-        
-        # # Draw MODEL samples (hollow circles) - what we're training
-        # for y_model in model_samples:
-        #     ax.scatter(t_slice, y_model, s=35, facecolor='white',
-        #               edgecolor=ATLAS_COLORS['fine'], linewidth=1.2, zorder=11, marker='o')
-        
-        # Draw contrastive arrows: model → data (gradient direction)
-        # Show a few representative arrows indicating the "push" direction
-        # for y_data in data_samples[:2]:  # Just show a couple arrows per slice
-        #     # Find closest model sample
-        #     dists = np.abs(model_samples - y_data)
-        #     closest_idx = np.argmin(dists)
-        #     y_model = model_samples[closest_idx]
-            
-        #     # Arrow from model to data (gradient pushes model toward data)
-        #     ax.annotate('', xy=(t_slice + 0.008, y_data), 
-        #                xytext=(t_slice - 0.008, y_model),
-        #                arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['fine'], 
-        #                               lw=1.2, alpha=0.6, mutation_scale=8))
-    
-    # Time slice labels
-    for i, frac in enumerate(time_slices):
-        t_idx = int(frac * (len(t) - 1))
-        ax.text(t[t_idx], 1.0, f'$t_{i+1}$', fontsize=7, ha='center', 
-               color=ATLAS_COLORS['data'], fontweight='bold')
-    
-    # Legend-like annotation (within plot bounds)
-    ax.scatter([], [], s=35, color=ATLAS_COLORS['data'], edgecolor='black', 
-              linewidth=0.8, marker='o', label='data')
-    ax.scatter([], [], s=35, facecolor='white', edgecolor=ATLAS_COLORS['fine'], 
-              linewidth=1.2, marker='o', label='model')
-    # ax.text(0.02, 0.82, '● data  ○ model', fontsize=6.5, transform=ax.transAxes,
-    #        color=ATLAS_COLORS['annotation'], 
-    #        bbox=dict(boxstyle='round,pad=0.1', facecolor='white', alpha=0.9, edgecolor='none'))
+            ax.scatter(t_slice, y_data, s=45, color="black", linewidth=1.2, zorder=12, marker='x')
     
     ax.set_xlim(t_range[0], t_range[1])
     ax.set_ylim(-1.1, 1.1)
     ax.set_title('DATA LIKELIHOOD', fontsize=11, fontweight='bold', color=ATLAS_COLORS['fine'], pad=4)
-    ax.text(0.5, 0.02, '$\\nabla_\\theta = \\mathbb{E}_{\\mathrm{data}}[\\nabla U] - \\mathbb{E}_{\\mathrm{model}}[\\nabla U]$', 
+    ax.text(0.5, 0.02, '$\\mathcal{L} = \\mathbb{E}_{\\mathrm{data}}[\\nabla U] - \\mathbb{E}_{\\mathrm{model}}[\\nabla U]$', 
             transform=ax.transAxes, ha='center', fontsize=7, color=ATLAS_COLORS['fine'])
     clean_axis(ax)
 
 
 def plot_observable(ax):
-    """Observable Matching: Match a coarse observable like ⟨x⟩.
+    """Observable Loss: L = (⟨O⟩ - target)²
     
-    Shows the AVERAGE POSITION as a function of time plotted ABOVE the trajectories.
-    This illustrates what the observable loss actually tracks - the ensemble mean.
+    Match a statistic (observable) rather than the full distribution.
+    This is coarse-grained matching - only care about specific moments.
+    
+    Gradient: ∇_θ L = 2(⟨O⟩ - target) · (-β) Cov_π(O, ∇_θU)
+    
+    Visual: Ensemble with mean trajectory, showing the gap to target.
     """
     # Get reference trajectory for time axis
     t_ref, _ = get_exemplar_trajectory()
@@ -742,42 +719,32 @@ def plot_observable(ax):
     t = np.linspace(0, 1, len(t_ref))
     t_end = t[-1]
     
-    # Plot all trajectories (more visible)
+    # Plot all trajectories (faded - individual paths don't matter)
     for i in range(n_paths):
-        ax.plot(t, x_batch[:, i], color=ATLAS_COLORS['coarse'], alpha=0.25, lw=0.7, zorder=2)
+        ax.plot(t, x_batch[:, i], color=ATLAS_COLORS['coarse'], alpha=0.20, lw=0.6, zorder=2)
     
     # =====================================================================
-    # KEY: Plot the OBSERVABLE ⟨x⟩_t as a function of time ABOVE trajectories
+    # KEY: Only the OBSERVABLE ⟨x⟩_t matters, not individual samples
+    # Loss = (⟨x⟩_T - target)²
     # =====================================================================
     mean_traj = np.mean(x_batch, axis=1)
     
-    # Offset the mean trajectory above to make it visually distinct (within bounds)
-    y_offset = 0.50  # Shift upward but stay within ylim
-    mean_traj_shifted = mean_traj + y_offset
+    # Plot the observable curve (thick, prominent - THIS is what we're matching)
+    ax.plot(t, mean_traj, color=ATLAS_COLORS['coarse'], lw=2.8, zorder=10, alpha=0.95)
     
-    # Plot the observable curve (thick, prominent)
-    ax.plot(t, mean_traj_shifted, color=ATLAS_COLORS['coarse'], lw=2.5, zorder=10, alpha=0.95)
-    ax.fill_between(t, y_offset - 0.05, mean_traj_shifted, color=ATLAS_COLORS['coarse'], alpha=0.15, zorder=9)
-    
-    # Label the observable (positioned within plot bounds)
+    # Label the observable
     mid_idx = len(t) // 3
-    ax.text(t[mid_idx], mean_traj_shifted[mid_idx] + 0.15, '$\\langle x \\rangle_t$', 
+    ax.text(t[mid_idx], mean_traj[mid_idx] + 0.20, '$\\langle x \\rangle_t$', 
             fontsize=9, color=ATLAS_COLORS['coarse'], fontweight='bold', ha='center', zorder=15)
     
-    # # Show target observable (dashed line)
-    # target_mean = 0.0  # Equilibrium mean should be ~0 for symmetric double-well
-    # ax.axhline(y=target_mean + y_offset, color=ATLAS_COLORS['data'], ls='--', lw=2, alpha=0.8, zorder=8)
-    # ax.text(t_end * 0.5, target_mean + y_offset + 0.12, '$\\langle x \\rangle^*$', 
-    #         fontsize=8, color=ATLAS_COLORS['data'], fontweight='bold', va='bottom', ha='center')
-    
-    # Show loss as gap between model and target at end
-    # ax.annotate('', xy=(t_end * 0.95, target_mean + y_offset), 
-    #            xytext=(t_end * 0.95, mean_traj_shifted[-1]),
-    #            arrowprops=dict(arrowstyle='<->', color=ATLAS_COLORS['annotation'], 
-    #                          lw=1.5, mutation_scale=8), zorder=11)
+    # Show target value as dashed line
+    target_mean = 0.0  # Equilibrium mean for symmetric double-well
+    ax.axhline(y=target_mean, color=ATLAS_COLORS['data'], ls='--', lw=1.5, alpha=0.7, zorder=8)
+    ax.text(t_end * 0.85, target_mean + 0.12, '$\\langle x \\rangle^*$', 
+            fontsize=8, color=ATLAS_COLORS['data'], fontweight='bold', va='bottom', ha='center')
     
     ax.set_title('OBSERVABLE', fontsize=11, fontweight='bold', color=ATLAS_COLORS['coarse'], pad=4)
-    ax.text(0.5, 0.02, '$(\\langle x \\rangle_T - \\langle x \\rangle^*)^2$', 
+    ax.text(0.5, 0.02, '$\\mathcal{L} = (\\langle x \\rangle_T - \\langle x \\rangle^*)^2$', 
             transform=ax.transAxes, ha='center', fontsize=8, color=ATLAS_COLORS['coarse'])
     ax.set_xlim(t_range[0], t_range[1])
     ax.set_ylim(-1.1, 1.1)
@@ -802,7 +769,7 @@ def main():
         ('II', 'Forward vs Backward'),
         ('III', 'SDE vs ODE'),
         ('IV', 'BPTT vs Likelihood Ratio'),
-        ('V', 'Data Likelihood vs Observable'),
+        ('V', 'Data Likelihood vs Observable'),  # Both use same gradient, different O
     ]
     
     # Plot panels - top row (first of each pair), bottom row (second of each pair)
@@ -882,6 +849,32 @@ def main():
     fig.text(x_ibp + 0.065, 0.395, 'var $\\sim T$', 
              fontsize=8.5, ha='left', va='center', color=ATLAS_COLORS['equilibrium'], 
              style='italic')
+    
+    # ==========================================================================
+    # Column V: Add "Loss Function" annotation between DATA LIKELIHOOD and OBSERVABLE
+    # KEY INSIGHT: Both are different LOSS choices, same underlying gradient structure!
+    # CD Loss: e_data - e_model  |  Observable Loss: (⟨O⟩ - target)²
+    # ==========================================================================
+    loss_color = '#059669'  # Emerald green for the loss connection
+    x_loss = 0.11 + 4 * 0.19  # Column V position
+    
+    # Top: CD Loss formula
+    fig.text(x_loss - 0.06, 0.54, '$\\mathcal{L}_\\mathrm{CD} = E_\\mathrm{data} - E_\\mathrm{model}$', 
+             fontsize=7.5, ha='center', va='bottom', color=ATLAS_COLORS['fine'],
+             fontweight='bold', bbox=dict(boxstyle='round,pad=0.1', facecolor='white', 
+                                          edgecolor=ATLAS_COLORS['fine'], alpha=0.8, lw=0.5))
+    
+    # "vs" with "choice of L" label - emphasizing it's about LOSS choice
+    # fig.text(x_loss - 0.06, 0.47, 'vs', fontsize=9, ha='center', va='center', 
+    #          color=loss_color, fontweight='bold', style='italic')
+    # fig.text(x_loss + 0.04, 0.47, 'choice\nof $\\mathcal{L}$', fontsize=7.5, ha='left', va='center', 
+    #          color=loss_color, fontweight='bold', linespacing=0.9)
+    
+    # Bottom: Observable Loss formula
+    fig.text(x_loss - 0.06, 0.40, '$\\mathcal{L}_\\mathrm{obs} = (\\langle\\mathcal{O}\\rangle - \\mathcal{O}^*)^2$', 
+             fontsize=7.5, ha='center', va='top', color=ATLAS_COLORS['coarse'],
+             fontweight='bold', bbox=dict(boxstyle='round,pad=0.1', facecolor='white', 
+                                          edgecolor=ATLAS_COLORS['coarse'], alpha=0.8, lw=0.5))
     
     # Main title
     fig.suptitle('The Gradient Method Atlas', fontsize=15, fontweight='bold',
