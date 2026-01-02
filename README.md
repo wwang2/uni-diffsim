@@ -3,7 +3,7 @@
 
 > "All chaos is order misunderstood."    — Alexander Pope
 
-![Gradient Estimators](assets/gradient_estimators.png)
+![the world of simulation gradients](assets/gradient_atlas.png)
 
 This project explores a question I've wondered about for years:
 
