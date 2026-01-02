@@ -101,6 +101,59 @@ where the log path probability gradient is:
 python scripts/demo_girsanov.py  # Generate the Girsanov analysis plot
 ```
 
+## Contrastive Divergence: The Loss Function Perspective
+
+![Contrastive Divergence Demo](assets/demo_contrastive_divergence.png)
+
+A profound connection exists between **statistical learning** and **differentiable simulation**. Contrastive Divergence (CD) training of energy-based models is a prime example where the loss function directly leverages our simulation framework.
+
+### The Key Insight
+
+For an energy-based model $p_\theta(x) \propto e^{-E_\theta(x)}$, maximum likelihood requires:
+
+```
+∇_θ L_ML = E_data[∇_θ E] - E_model[∇_θ E]
+         = (positive phase) - (negative phase)
+```
+
+The **negative phase** requires sampling from the model—exactly what differentiable simulation provides!
+
+### Three CD Loss Functions
+
+| Method | Description | Memory | Variance |
+|--------|-------------|--------|----------|
+| **CD-BPTT** | Backprop through k Langevin steps | O(k) | Low |
+| **CD-REINFORCE** | Score function on model samples | O(1) | Higher |
+| **Persistent CD** | Maintain chains across updates | O(n_chains) | Low |
+
+```python
+def cd_loss_bptt(model, data, integrator, dt, k):
+    """Gradients flow through the Langevin chain."""
+    e_data = model.energy(data).mean()
+    x_model = integrator.run(data, model.force, dt, n_steps=k, final_only=True)[0]
+    e_model = model.energy(x_model).mean()
+    return e_data - e_model  # Backprop works!
+```
+
+### The Deep Connection
+
+CD is the equilibrium covariance formula in action:
+```
+∇_θ L_CD ≈ -β Cov_p(𝟙_data, ∇_θ U)
+```
+
+The positive phase pulls probability toward data; the negative phase pushes it away from model samples. This is exactly the REINFORCE gradient applied to maximum likelihood!
+
+**Key findings** (see plot above):
+- **CD-k trade-off**: Larger k = better gradients but more compute. CD-1 often works!
+- **BPTT vs REINFORCE**: Same trade-off as elsewhere—variance vs memory
+- **Persistent CD**: Better mixing without longer chains
+- **Neural EBMs**: Framework extends to neural network energy functions
+
+```bash
+python scripts/demo_contrastive_divergence.py  # Generate the CD comparison plot
+```
+
 ## Adjoint Methods (Trade Memory with Time!)
 
 ![Nosé-Hoover Adjoint](assets/demo_nosehoover_adjoint.png)
