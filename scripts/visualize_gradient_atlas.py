@@ -668,15 +668,14 @@ def plot_data_likelihood(ax):
         t_slice = t[t_idx]
         
         # Draw vertical time slice indicator
-        ax.axvline(x=t_slice, color=ATLAS_COLORS['data'], alpha=0.3, ls='--', lw=1.0, zorder=1)
+        # ax.axvline(x=t_slice, color=ATLAS_COLORS['data'], alpha=0.3, ls='--', lw=1.0, zorder=1)
         
         # Get model samples at this time slice
         model_samples = x_batch[t_idx, :]
         
         # Draw DATA samples (filled circles with black edge) - target distribution
         for y_data in data_samples:
-            ax.scatter(t_slice, y_data, s=40, color=ATLAS_COLORS['data'], 
-                      edgecolor='black', linewidth=0.8, zorder=12, marker='o')
+            ax.scatter(t_slice, y_data, s=40, color="black", linewidth=0.8, zorder=12, marker='x')
         
         # # Draw MODEL samples (hollow circles) - what we're training
         # for y_model in model_samples:

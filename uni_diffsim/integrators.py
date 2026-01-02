@@ -105,13 +105,13 @@ class OverdampedLangevin(Integrator):
         self.gamma = nn.Parameter(torch.tensor(gamma))
         self.kT = nn.Parameter(torch.tensor(kT))
     
-    def step(self, x: torch.Tensor, force_fn: ForceFunc, dt: float) -> torch.Tensor:
+    def step(self, x: torch.Tensor, force_fn: ForceFunc, dt: float | torch.Tensor) -> torch.Tensor:
         """Single integration step. Returns new positions."""
         force = force_fn(x)
         noise_scale = torch.sqrt(2 * self.kT * dt / self.gamma)
         return x + (force / self.gamma) * dt + noise_scale * torch.randn_like(x)
 
-    def run(self, x0: torch.Tensor, force_fn: ForceFunc, dt: float, 
+    def run(self, x0: torch.Tensor, force_fn: ForceFunc, dt: float | torch.Tensor,
             n_steps: int, store_every: int = 1, final_only: bool = False) -> torch.Tensor:
         """Run trajectory. Returns (n_stored, ..., dim) positions.
         
@@ -154,7 +154,7 @@ class BAOAB(Integrator):
         self.mass = nn.Parameter(torch.tensor(mass))
     
     def step(self, x: torch.Tensor, v: torch.Tensor, force_fn: ForceFunc, 
-             dt: float) -> tuple[torch.Tensor, torch.Tensor]:
+             dt: float | torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Single BAOAB step. Returns (new_x, new_v)."""
         v = v + (dt / 2) * force_fn(x) / self.mass
         x = x + (dt / 2) * v
@@ -166,7 +166,7 @@ class BAOAB(Integrator):
         return x, v
 
     def run(self, x0: torch.Tensor, v0: torch.Tensor | None, force_fn: ForceFunc,
-            dt: float, n_steps: int, store_every: int = 1, final_only: bool = False
+            dt: float | torch.Tensor, n_steps: int, store_every: int = 1, final_only: bool = False
             ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run trajectory. Returns (positions, velocities) each (n_stored, ...).
         
@@ -205,7 +205,7 @@ class VelocityVerlet(Integrator):
         self.mass = nn.Parameter(torch.tensor(mass))
     
     def step(self, x: torch.Tensor, v: torch.Tensor, force_fn: ForceFunc,
-             dt: float) -> tuple[torch.Tensor, torch.Tensor]:
+             dt: float | torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Single Verlet step. Returns (new_x, new_v)."""
         v = v + (dt / 2) * force_fn(x) / self.mass
         x = x + dt * v
@@ -213,7 +213,7 @@ class VelocityVerlet(Integrator):
         return x, v
     
     def run(self, x0: torch.Tensor, v0: torch.Tensor, force_fn: ForceFunc,
-            dt: float, n_steps: int, store_every: int = 1, final_only: bool = False
+            dt: float | torch.Tensor, n_steps: int, store_every: int = 1, final_only: bool = False
             ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run trajectory. Returns (positions, velocities).
         
@@ -256,7 +256,7 @@ class NoseHoover(Integrator):
         self.Q = nn.Parameter(torch.tensor(Q))
     
     def step(self, x: torch.Tensor, v: torch.Tensor, alpha: torch.Tensor,
-             force_fn: ForceFunc, dt: float
+             force_fn: ForceFunc, dt: float | torch.Tensor
              ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Single Nosé-Hoover step using Kleinerman 08 scheme.
         
@@ -298,7 +298,7 @@ class NoseHoover(Integrator):
         return x, v, alpha
 
     def run(self, x0: torch.Tensor, v0: torch.Tensor | None, force_fn: ForceFunc,
-            dt: float, n_steps: int, store_every: int = 1, final_only: bool = False
+            dt: float | torch.Tensor, n_steps: int, store_every: int = 1, final_only: bool = False
             ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run trajectory. Returns (positions, velocities).
         
@@ -348,7 +348,7 @@ class NoseHooverChain(Integrator):
         self.n_chain = n_chain  # structural parameter, not differentiable
     
     def step(self, x: torch.Tensor, v: torch.Tensor, xi: torch.Tensor,
-             force_fn: ForceFunc, dt: float, ndof: int
+             force_fn: ForceFunc, dt: float | torch.Tensor, ndof: int
              ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Single NHC step. Returns (new_x, new_v, new_xi).
         
@@ -401,7 +401,7 @@ class NoseHooverChain(Integrator):
         return x, v, xi_new
     
     def run(self, x0: torch.Tensor, v0: torch.Tensor | None, force_fn: ForceFunc,
-            dt: float, n_steps: int, store_every: int = 1, final_only: bool = False
+            dt: float | torch.Tensor, n_steps: int, store_every: int = 1, final_only: bool = False
             ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run trajectory. Returns (positions, velocities).
         
@@ -516,7 +516,7 @@ class ESH(Integrator):
         return u_new, r_new
     
     def step(self, x: torch.Tensor, u: torch.Tensor, r: torch.Tensor,
-             grad_fn: GradFunc, dt: float | None = None
+             grad_fn: GradFunc, dt: float | torch.Tensor | None = None
              ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Single ESH leapfrog step with scaled dynamics.
         
@@ -546,7 +546,7 @@ class ESH(Integrator):
         return x, u, r
     
     def run(self, x0: torch.Tensor, u0: torch.Tensor | None, grad_fn: GradFunc,
-            n_steps: int, dt: float | None = None, store_every: int = 1,
+            n_steps: int, dt: float | torch.Tensor | None = None, store_every: int = 1,
             final_only: bool = False
             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run ESH trajectory.
@@ -623,7 +623,7 @@ class GLE(Integrator):
         self.n_modes = len(gamma)
     
     def step(self, x: torch.Tensor, v: torch.Tensor, s: torch.Tensor,
-             force_fn: ForceFunc, dt: float
+             force_fn: ForceFunc, dt: float | torch.Tensor
              ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Single GLE step using BAOAB-like splitting.
         
@@ -672,7 +672,7 @@ class GLE(Integrator):
         return x, v, s
     
     def run(self, x0: torch.Tensor, v0: torch.Tensor | None, force_fn: ForceFunc,
-            dt: float, n_steps: int, store_every: int = 1, final_only: bool = False
+            dt: float | torch.Tensor, n_steps: int, store_every: int = 1, final_only: bool = False
             ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run GLE trajectory. Returns (positions, velocities).
         
