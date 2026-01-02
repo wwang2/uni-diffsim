@@ -125,9 +125,9 @@ def plot_path(ax):
                     arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['sensitivity'],
                                    lw=1.2, ls='--', connectionstyle='arc3,rad=0.15'))
     
-    ax.set_title('PATH', fontsize=10, fontweight='bold', color=ATLAS_COLORS['path_single'], pad=3)
+    ax.set_title('PATH', fontsize=11, fontweight='bold', color=ATLAS_COLORS['path_single'], pad=4)
     # Show the pathwise formula
-    ax.text(0.5, 0.02, '"remembers"', transform=ax.transAxes, ha='center', fontsize=8,
+    ax.text(0.5, 0.02, '"remembers"', transform=ax.transAxes, ha='center', fontsize=9,
             style='italic', color=ATLAS_COLORS['annotation'])
     clean_axis(ax)
 
@@ -157,9 +157,9 @@ def plot_ensemble(ax):
     ax.plot(t[-1] + eq_dist, y_range, color=ATLAS_COLORS['equilibrium'], lw=1.5)
     ax.text(t[-1] + 0.5, 0, '$\\pi$', fontsize=10, color=ATLAS_COLORS['equilibrium'], fontweight='bold')
     
-    ax.set_title('ENSEMBLE', fontsize=10, fontweight='bold', color=ATLAS_COLORS['ensemble_base'], pad=3)
+    ax.set_title('ENSEMBLE', fontsize=11, fontweight='bold', color=ATLAS_COLORS['ensemble_base'], pad=4)
     # Emphasize this is space average over distribution (history forgotten)
-    ax.text(0.5, 0.02, '"forgets"', transform=ax.transAxes, ha='center', fontsize=8,
+    ax.text(0.5, 0.02, '"forgets"', transform=ax.transAxes, ha='center', fontsize=9,
             style='italic', color=ATLAS_COLORS['annotation'])
     ax.set_xlim(t[0] - 0.3, t[-1] + 1.5)
     clean_axis(ax)
@@ -178,7 +178,7 @@ def plot_forward(ax):
     for idx in [20, 45, 70, 95]:
         draw_flow_arrow(ax, t, x, idx, 'forward', ATLAS_COLORS['arrow_fwd'])
     
-    ax.set_title('FORWARD', fontsize=10, fontweight='bold', color=ATLAS_COLORS['arrow_fwd'], pad=3)
+    ax.set_title('FORWARD', fontsize=11, fontweight='bold', color=ATLAS_COLORS['arrow_fwd'], pad=4)
     ax.text(0.5, 0.02, '$0 \\to T$', transform=ax.transAxes, ha='center', fontsize=9,
             color=ATLAS_COLORS['arrow_fwd'])
     clean_axis(ax)
@@ -197,7 +197,7 @@ def plot_backward(ax):
     for idx in [95, 65, 35]:
         draw_flow_arrow(ax, t, x, idx, 'backward', ATLAS_COLORS['arrow_bwd'])
     
-    ax.set_title('BACKWARD', fontsize=10, fontweight='bold', color=ATLAS_COLORS['arrow_bwd'], pad=3)
+    ax.set_title('BACKWARD', fontsize=11, fontweight='bold', color=ATLAS_COLORS['arrow_bwd'], pad=4)
     ax.text(0.5, 0.02, '$T \\to 0$', transform=ax.transAxes, ha='center', fontsize=9,
             color=ATLAS_COLORS['arrow_bwd'])
     clean_axis(ax)
@@ -221,8 +221,8 @@ def plot_sde(ax):
                     xytext=(t[pt], x[pt]),
                     arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['noise'], lw=1.2, alpha=0.6))
     
-    ax.set_title('SDE', fontsize=10, fontweight='bold', color=ATLAS_COLORS['noise'], pad=3)
-    ax.text(0.5, 0.02, '$dW_t$ noise', transform=ax.transAxes, ha='center', fontsize=8,
+    ax.set_title('SDE', fontsize=11, fontweight='bold', color=ATLAS_COLORS['noise'], pad=4)
+    ax.text(0.5, 0.02, '$dW_t$ noise', transform=ax.transAxes, ha='center', fontsize=9,
             color=ATLAS_COLORS['noise'])
     clean_axis(ax)
 
@@ -238,8 +238,8 @@ def plot_ode(ax):
         ax.plot([t[pt], t[pt]], [x[pt], xi[pt] * 0.4], 
                color=ATLAS_COLORS['thermostat'], ls=':', lw=1, alpha=0.5)
     
-    ax.set_title('ODE', fontsize=10, fontweight='bold', color=ATLAS_COLORS['thermostat'], pad=3)
-    ax.text(0.5, 0.02, '$\\xi$ thermostat', transform=ax.transAxes, ha='center', fontsize=8,
+    ax.set_title('ODE', fontsize=11, fontweight='bold', color=ATLAS_COLORS['thermostat'], pad=4)
+    ax.text(0.5, 0.02, '$\\xi$ thermostat', transform=ax.transAxes, ha='center', fontsize=9,
             color=ATLAS_COLORS['thermostat'])
     clean_axis(ax)
 
@@ -249,106 +249,180 @@ def plot_ode(ax):
 # =============================================================================
 
 def plot_reinforce(ax):
-    """REINFORCE - equilibrium score function estimator.
+    """REINFORCE - Trajectories → Final samples → O · ∇_θU → Gradient.
     
-    Uses score of the EQUILIBRIUM distribution: ∇_θ log π(x) = -β∇_θU(x)
-    Each sample gets weighted by its local score - no path memory needed.
+    Key insight: For equilibrium observables, the gradient is:
+        ∇_θ ⟨O⟩ = -β Cov(O, ∇_θU) = -β ⟨(O - ⟨O⟩) · ∇_θU⟩
+    
+    Trajectory endpoints become samples. Each sample contributes:
+        O(xᵢ) · (-β ∇_θU(xᵢ))
     """
-    n_paths = 15
-    
-    # Show samples from equilibrium distribution (endpoints only matter)
     np.random.seed(200)
-    endpoints_x = np.random.randn(n_paths) * 0.8 + 0.5  # samples from π
-    endpoints_y = np.linspace(0.1, 0.9, n_paths)  # just for visual spread
     
-    # Draw faded trajectories leading to endpoints (to show they don't matter)
-    for i in range(n_paths):
-        t, x = generate_sde_trajectory(seed=200 + i, n_steps=120, noise_scale=0.35)
-        # Fade the trajectory - history doesn't matter for equilibrium score
-        ax.plot(t, x, color=ATLAS_COLORS['gray'], alpha=0.15, lw=0.8)
+    # =========================================================================
+    # Background: Show the observable O(x) as a hint
+    # =========================================================================
+    y_range_full = np.linspace(-1.8, 1.8, 100)
+    # Observable O(x) = x (simple linear observable for schematic)
+    # Let's show it as a subtle gradient or color bar
+    ax.fill_between([0, 2.5], -1.8, 1.8, color=ATLAS_COLORS['fill'], alpha=0.15, zorder=0)
     
-    # Equilibrium distribution on the right
-    y_range = np.linspace(-2, 2, 80)
-    eq_dist = np.exp(-0.5 * (y_range - 0.3)**2 / 0.6**2)
-    eq_dist = eq_dist / eq_dist.max() * 0.6
-    t_end = 6.0
-    ax.fill_betweenx(y_range, t_end, t_end + eq_dist, color=ATLAS_COLORS['reinforce'], alpha=0.2)
-    ax.plot(t_end + eq_dist, y_range, color=ATLAS_COLORS['reinforce'], lw=1.5, alpha=0.7)
+    # =========================================================================
+    # Generate trajectories and collect endpoints as samples
+    # =========================================================================
+    n_traj = 6
+    n_steps = 60
+    t_max = 1.6
     
-    # Show samples ON the distribution with their local scores
-    sample_ys = np.array([-0.8, -0.2, 0.3, 0.6, 1.0, 1.4])
-    for y in sample_ys:
-        # Sample point on distribution
-        p_val = np.exp(-0.5 * (y - 0.3)**2 / 0.6**2)
-        p_val = p_val / np.exp(0) * 0.6  # normalize
-        ax.scatter(t_end + p_val * 0.5, y, s=60, color=ATLAS_COLORS['reinforce'], 
-                  edgecolor='white', linewidth=0.8, zorder=10)
+    endpoints = []
+    for i in range(n_traj):
+        t, x = generate_sde_trajectory(seed=200 + i, n_steps=n_steps, noise_scale=0.35)
+        t_scaled = t / t.max() * t_max
+        ax.plot(t_scaled, x, color=ATLAS_COLORS['reinforce'], alpha=0.18, lw=0.8)
+        endpoints.append(x[-1])
+    
+    endpoints = np.array(endpoints)
+    x_sample = t_max + 0.1
+    
+    # =========================================================================
+    # Mark trajectory endpoints and their contributions
+    # =========================================================================
+    for i, y in enumerate(endpoints):
+        # Sample point
+        ax.scatter(x_sample, y, s=50, color=ATLAS_COLORS['reinforce'], 
+                  edgecolor='white', linewidth=1.2, zorder=10)
         
-        # Local score arrow: ∇_θ log π ∝ -∇_θU (points toward high probability)
-        score_direction = -(y - 0.3) * 0.15  # gradient of log π
-        if abs(score_direction) > 0.02:
-            ax.annotate('', xy=(t_end + p_val * 0.5, y + score_direction),
-                       xytext=(t_end + p_val * 0.5, y),
+        # O · ∇_θU arrow (the "score contribution")
+        # For x^2 observable and Gaussian p, score is proportional to x
+        arrow_len = y * 0.25
+        if abs(arrow_len) > 0.05:
+            ax.annotate('', xy=(x_sample + arrow_len, y), xytext=(x_sample, y),
                        arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['reinforce'], 
-                                      lw=1.2, alpha=0.7))
+                                      lw=1.8, alpha=0.9, mutation_scale=9))
     
-    ax.set_title('REINFORCE', fontsize=10, fontweight='bold', color=ATLAS_COLORS['reinforce'], pad=3)
-    # Emphasize this is LOCAL score at each sample (no path integral)
-    ax.text(0.5, 0.02, '$R \\cdot \\nabla\\log p$', transform=ax.transAxes, ha='center', fontsize=8,
-            color=ATLAS_COLORS['reinforce'])
-    ax.set_xlim(-0.3, t_end + 1.2)
+    # Label for samples
+    ax.text(x_sample, 1.6, '$x_i$', fontsize=8, ha='center',
+            color=ATLAS_COLORS['reinforce'], fontweight='bold')
+    
+    # =========================================================================
+    # RIGHT: Funneling to the aggregate gradient
+    # =========================================================================
+    x_funnel = x_sample + 0.5
+    x_grad = x_funnel + 0.35
+    
+    # Funnel lines
+    for y in endpoints:
+        arrow_len = y * 0.25
+        ax.plot([x_sample + arrow_len, x_funnel], [y, 0], 
+               color=ATLAS_COLORS['reinforce'], lw=0.6, alpha=0.15, ls='--')
+    
+    # Gradient aggregate arrow
+    ax.annotate('', xy=(x_grad + 0.3, 0), xytext=(x_funnel, 0),
+                arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['reinforce'], 
+                               lw=2.8, mutation_scale=12))
+    
+    # Labels
+    # ax.text(x_grad + 0.15, 0.25, '$\\nabla_\\theta\\langle O\\rangle$', fontsize=8,
+    #         color=ATLAS_COLORS['reinforce'], fontweight='bold', ha='center')
+    
+    ax.text(x_grad - 0.1, -0.6, '$-\\beta\\mathrm{Cov}(O, \\nabla_\\theta U)$', 
+            fontsize=7, ha='center', color=ATLAS_COLORS['reinforce'], style='italic')
+
+    ax.set_title('REINFORCE (Score)', fontsize=11, fontweight='bold', 
+                 color=ATLAS_COLORS['reinforce'], pad=4)
+    
+    ax.set_xlim(-0.1, x_grad + 0.6)
+    ax.set_ylim(-1.8, 1.8)
     clean_axis(ax)
 
 
 def plot_girsanov(ax):
-    """Girsanov - path reweighting via Radon-Nikodym derivative.
+    """Girsanov - Ensemble of paths with LOCAL accumulation of log p(τ).
     
-    Computes PATH INTEGRAL: M_T = exp(∫₀ᵀ ... dW_t)
-    The weight accumulates along the ENTIRE trajectory - path memory required.
+    Key insight: For path-dependent observables O(τ), the gradient is:
+        ∇_θ ⟨O⟩ = ⟨O(τ) · ∇_θ log p(τ|θ)⟩
+    
+    where the path score is a PATH INTEGRAL that accumulates locally:
+        ∇_θ log p(τ) = (1/σ²) Σₜ ∇_θb(xₜ) · ΔWₜ
+    
+    Path thickness reflects accumulated weight. 
     """
-    t, x_ref = generate_sde_trajectory(seed=42, n_steps=120, drift_scale=0.05)
-    ax.plot(t, x_ref, color=ATLAS_COLORS['gray'], lw=2.5, alpha=0.35, label='$\\mathbb{Q}$')
-    
-    # Perturbed path under P_θ
     np.random.seed(42)
-    x_pert = np.zeros(120)
-    x_pert[0] = x_ref[0]
-    dt = t[1] - t[0]
-    for i in range(1, 120):
-        x_pert[i] = x_pert[i-1] - 0.15 * x_pert[i-1] * dt + 0.3 * np.sqrt(dt) * np.random.randn()
-    ax.plot(t, x_pert, color=ATLAS_COLORS['girsanov'], lw=1.8, alpha=0.9, label='$\\mathbb{P}_\\theta$')
+    n_steps = 70
+    dt = 0.04
+    t = np.linspace(0, n_steps * dt, n_steps)
     
-    # Compute and show M_t ACCUMULATING along the path (key visual!)
-    # M_t = exp(∫₀ᵗ (b_θ - b_Q)/σ dW - 1/2 ∫₀ᵗ ((b_θ - b_Q)/σ)² ds)
-    weight_pts = [0, 25, 50, 75, 100, 119]
-    M_values = [1.0]  # M_0 = 1
-    for i in range(1, len(weight_pts)):
-        # M accumulates along path - this is a PATH INTEGRAL
-        drift_diff_accum = np.sum(np.abs(x_pert[:weight_pts[i]] - x_ref[:weight_pts[i]])) * 0.015
-        M_values.append(np.exp(drift_diff_accum * 0.4))
+    # =========================================================================
+    # Generate ENSEMBLE of paths with tracked weight accumulation
+    # =========================================================================
+    n_paths = 8
+    paths = []
+    path_weights = []
     
-    # Normalize for visualization
-    M_values = np.array(M_values)
-    M_normalized = (M_values - M_values.min()) / (M_values.max() - M_values.min() + 0.01)
+    for p in range(n_paths):
+        x = np.zeros(n_steps)
+        log_weight = np.zeros(n_steps)
+        np.random.seed(300 + p)
+        cumulative = 0.0
+        for j in range(1, n_steps):
+            dW = np.random.randn()
+            drift = -0.15 * x[j-1]
+            x[j] = x[j-1] + drift * dt + 0.35 * np.sqrt(dt) * dW
+            
+            # Local accumulation: Δ log p ∝ drift_gradient · dW
+            # Using a simplified model where drift gradient is constant
+            local_contrib = 0.25 * dW 
+            cumulative += local_contrib
+            log_weight[j] = cumulative
+        
+        paths.append(x)
+        path_weights.append(log_weight)
     
-    # Draw M_t as GROWING circles to show accumulation
-    for i, pt in enumerate(weight_pts):
-        size = 12 + 55 * M_normalized[i]
-        ax.scatter(t[pt], x_pert[pt], s=size, color=ATLAS_COLORS['girsanov'], 
-                  edgecolor='white', linewidth=0.8, zorder=10, alpha=0.8)
+    # =========================================================================
+    # Draw paths with THICKNESS proportional to accumulated weight
+    # =========================================================================
+    all_final_weights = [pw[-1] for pw in path_weights]
+    w_min, w_max = min(all_final_weights), max(all_final_weights)
+    w_range = w_max - w_min + 0.01
     
-    # Draw bracket showing final M_T
-    ax.annotate('', xy=(t[-1] + 0.3, x_pert[-1] + 0.2),
-                xytext=(t[-1] + 0.3, x_pert[-1] - 0.2),
-                arrowprops=dict(arrowstyle=']-[', color=ATLAS_COLORS['girsanov'], lw=1.5))
-    ax.text(t[-1] + 0.5, x_pert[-1], '$M_T$', fontsize=9, color=ATLAS_COLORS['girsanov'],
-           fontweight='bold', va='center')
+    for p, (x, log_w) in enumerate(zip(paths, path_weights)):
+        # Very distinct linewidth variation
+        w_norm = (log_w[-1] - w_min) / w_range
+        lw = 0.5 + 3.5 * (w_norm**1.5)  # non-linear for more contrast
+        alpha = 0.15 + 0.65 * w_norm
+        ax.plot(t, x, color=ATLAS_COLORS['girsanov'], lw=lw, alpha=alpha)
+        
+        # Observable marker at end
+        ax.scatter(t[-1], x[-1], s=25, color=ATLAS_COLORS['data'], 
+                  edgecolor='black', linewidth=0.8, zorder=15)
+
+    # =========================================================================
+    # Path Integral Detail: Show accumulation on ONE path
+    # =========================================================================
+    main_idx = np.argsort(all_final_weights)[-2] # pick a high-weight path
+    main_path = paths[main_idx]
     
-    ax.set_title('GIRSANOV', fontsize=10, fontweight='bold', color=ATLAS_COLORS['girsanov'], pad=3)
-    # Emphasize this is a PATH INTEGRAL (Radon-Nikodym derivative)
-    ax.text(0.5, 0.02, '$M_T = \\frac{d\\mathbb{P}_\\theta}{d\\mathbb{Q}}$', 
-            transform=ax.transAxes, ha='center', fontsize=8, color=ATLAS_COLORS['girsanov'])
-    ax.set_xlim(t[0] - 0.2, t[-1] + 1.0)
+    checkpoints = [10, 22, 34, 46, 58]
+    for cp in checkpoints:
+        x_c, y_c = t[cp], main_path[cp]
+        # "Score packet" - a small pulse showing local contribution
+        pulse_x = np.linspace(-0.06, 0.06, 10)
+        pulse_y = 0.12 * np.exp(-pulse_x**2 / 0.001)
+        ax.plot(x_c + pulse_x, y_c + pulse_y, color="black", lw=1.5, alpha=0.8)
+        
+    # Labels for accumulation
+    ax.text(t[checkpoints[1]], main_path[checkpoints[1]] + 0.3, '$\\delta \\ell_t$', 
+            fontsize=8, color=ATLAS_COLORS['noise'], ha='center')
+    
+    # Label for path integral formula
+    ax.text(t[-1], -1.3, '$\\langle O(\\tau) \\cdot \\int \\nabla_\\theta b \\cdot dW_t \\rangle$', 
+            fontsize=7.5, color=ATLAS_COLORS['girsanov'], ha='left', style='italic')
+    
+    ax.set_title('GIRSANOV (Reweight)', fontsize=11, fontweight='bold', 
+                 color=ATLAS_COLORS['girsanov'], pad=4)
+    
+    ax.set_xlim(-0.05, t[-1] + 0.8)
+    ax.set_ylim(-1.8, 1.8)
     clean_axis(ax)
 
 
@@ -377,7 +451,7 @@ def plot_fine(ax):
     
     for y_data in data_targets:
         # Data point marker (yellow circle)
-        ax.scatter(t_end, y_data, s=70, color=ATLAS_COLORS['data'], 
+        ax.scatter(t_end , y_data, s=25, color=ATLAS_COLORS['data'], 
                   edgecolor='black', linewidth=1, zorder=10, marker='o')
     
     # Show model distribution p_θ at the end (where simulation lands)
@@ -385,20 +459,20 @@ def plot_fine(ax):
     # Current model distribution (slightly misaligned with data)
     model_dist = np.exp(-0.5 * (y_range - 0.2)**2 / 0.7**2)
     model_dist = model_dist / model_dist.max() * 0.6
-    ax.fill_betweenx(y_range, t_end + 0.1, t_end + 0.1 + model_dist, 
+    ax.fill_betweenx(y_range, t_end, t_end + model_dist, 
                      color=ATLAS_COLORS['fine'], alpha=0.3)
-    ax.plot(t_end + 0.1 + model_dist, y_range, color=ATLAS_COLORS['fine'], lw=1.2, alpha=0.7)
+    ax.plot(t_end  + model_dist, y_range, color=ATLAS_COLORS['fine'], lw=1.2, alpha=0.7)
     
-    # Arrows from model distribution toward data points (showing gradient direction)
-    # This is the "contrastive" part: push probability toward data
-    for y_data in data_targets[1:4]:  # show a few arrows
-        # Arrow from current model peak toward data
-        model_y = 0.2  # current model mean
-        if abs(y_data - model_y) > 0.2:
-            ax.annotate('', xy=(t_end - 0.3, y_data),
-                       xytext=(t_end - 0.3, model_y + 0.3 * np.sign(y_data - model_y)),
-                       arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['fine'], 
-                                      lw=1.3, alpha=0.7))
+    # # Arrows from model distribution toward data points (showing gradient direction)
+    # # This is the "contrastive" part: push probability toward data
+    # for y_data in data_targets[1:4]:  # show a few arrows
+    #     # Arrow from current model peak toward data
+    #     model_y = 0.2  # current model mean
+    #     if abs(y_data - model_y) > 0.2:
+    #         ax.annotate('', xy=(t_end - 0.3, y_data),
+    #                    xytext=(t_end - 0.3, model_y + 0.3 * np.sign(y_data - model_y)),
+    #                    arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['fine'], 
+    #                                   lw=1.3, alpha=0.7))
     
     # Labels
     ax.text(t_end + 0.8, 1.0, '$p_\\theta$', fontsize=8, color=ATLAS_COLORS['fine'], fontweight='bold')
@@ -406,48 +480,75 @@ def plot_fine(ax):
     
     ax.set_xlim(-0.3, t_end + 1.3)
     ax.set_ylim(-2, 2)
-    ax.set_title('FINE (ML)', fontsize=10, fontweight='bold', color=ATLAS_COLORS['fine'], pad=3)
+    ax.set_title('FINE (data likelihood)', fontsize=11, fontweight='bold', color=ATLAS_COLORS['fine'], pad=4)
     ax.text(0.5, 0.02, '$-\\log p_\\theta(x^{\\mathrm{data}})$', 
             transform=ax.transAxes, ha='center', fontsize=8, color=ATLAS_COLORS['fine'])
     clean_axis(ax)
 
 
 def plot_coarse(ax):
-    """Coarse-grained: Observable matching - match statistics only."""
+    """Coarse-grained: Observable matching - match average position ⟨x⟩.
+    
+    Shows matching a COARSE observable like mean position ⟨x⟩ rather than 
+    individual sample positions. Only care about the statistic, not the samples.
+    """
+    np.random.seed(400)
+    
     # Generate ensemble
-    n_paths = 18
+    n_paths = 15
     all_endpoints = []
     
     for i in range(n_paths):
-        t, x = generate_sde_trajectory(seed=400 + i, n_steps=100, noise_scale=0.32)
-        weight = np.exp(-0.2 * (x[-1])**2)
-        color = plt.cm.Blues(0.3 + 0.5 * weight)
-        ax.plot(t, x, color=color, alpha=0.25, lw=0.9)
+        t, x = generate_sde_trajectory(seed=400 + i, n_steps=80, noise_scale=0.35)
+        ax.plot(t, x, color=ATLAS_COLORS['coarse'], alpha=0.2, lw=0.8)
         all_endpoints.append(x[-1])
     
-    # Show the observable: mean (coarse statistic)
-    mean_endpoint = np.mean(all_endpoints)
-    target_mean = 0.5
+    all_endpoints = np.array(all_endpoints)
     
-    # Horizontal lines showing ⟨O⟩_sim vs O_target
-    ax.axhline(mean_endpoint, color=ATLAS_COLORS['coarse'], lw=2, ls='-', alpha=0.8)
-    ax.axhline(target_mean, color=ATLAS_COLORS['data'], lw=2, ls='--', alpha=0.8)
+    # =========================================================================
+    # Show the COARSE observable: average position ⟨x⟩
+    # =========================================================================
     
-    # Arrow showing the gap to minimize
-    mid_t = t[-1] * 0.7
-    ax.annotate('', xy=(mid_t, target_mean), xytext=(mid_t, mean_endpoint),
-               arrowprops=dict(arrowstyle='<->', color=ATLAS_COLORS['annotation'], lw=1.5))
+    # Current model mean
+    model_mean = np.mean(all_endpoints)
+    
+    # Target mean (what we want to match)
+    target_mean = 0.6
+    
+    t_end = t[-1]
+    
+    # Horizontal lines showing ⟨x⟩_sim vs ⟨x⟩_target
+    ax.axhline(model_mean, xmin=0.7, xmax=0.95, color=ATLAS_COLORS['coarse'], 
+              lw=2.5, ls='-', alpha=0.9)
+    ax.axhline(target_mean, xmin=0.7, xmax=0.95, color=ATLAS_COLORS['data'], 
+              lw=2.5, ls='--', alpha=0.9)
+    
+    # Vertical arrow showing the gap to minimize
+    arrow_x = t_end * 0.85
+    ax.annotate('', xy=(arrow_x, target_mean), xytext=(arrow_x, model_mean),
+               arrowprops=dict(arrowstyle='<->', color=ATLAS_COLORS['annotation'], 
+                              lw=1.8, mutation_scale=10))
     
     # Labels
-    ax.text(t[-1] + 0.2, mean_endpoint, '$\\langle O \\rangle$', fontsize=8, 
+    ax.text(t_end + 0.15, model_mean, '$\\langle x \\rangle$', fontsize=8, 
            color=ATLAS_COLORS['coarse'], va='center', fontweight='bold')
-    ax.text(t[-1] + 0.2, target_mean, '$O^*$', fontsize=8, 
+    ax.text(t_end + 0.15, target_mean, '$x^*$', fontsize=8, 
            color=ATLAS_COLORS['data'], va='center', fontweight='bold')
     
-    ax.set_title('COARSE (Obs)', fontsize=10, fontweight='bold', color=ATLAS_COLORS['coarse'], pad=3)
-    ax.text(0.5, 0.02, '$(\\langle O \\rangle - O^*)^2$', 
+    # Scatter endpoints to show the distribution (but we only care about mean!)
+    for ep in all_endpoints:
+        ax.scatter(t_end + 0.05, ep, s=18, color=ATLAS_COLORS['coarse'], 
+                  edgecolor='white', linewidth=0.4, alpha=0.5, zorder=5)
+    
+    # Emphasize: we only care about the MEAN, not individual samples
+    ax.text(t_end * 0.5, 1.45, 'only $\\langle x \\rangle$ matters', fontsize=6,
+           color=ATLAS_COLORS['gray'], ha='center', style='italic', alpha=0.7)
+    
+    ax.set_title('COARSE (Obs)', fontsize=11, fontweight='bold', color=ATLAS_COLORS['coarse'], pad=4)
+    ax.text(0.5, 0.02, '$(\\langle x \\rangle - x^*)^2$', 
             transform=ax.transAxes, ha='center', fontsize=8, color=ATLAS_COLORS['coarse'])
-    ax.set_xlim(t[0] - 0.3, t[-1] + 1.0)
+    ax.set_xlim(t[0] - 0.2, t_end + 0.7)
+    ax.set_ylim(-1.8, 1.8)
     clean_axis(ax)
 
 
@@ -501,14 +602,14 @@ def main():
     # Column labels on top
     for i, (num, label) in enumerate(col_info):
         x_pos = 0.11 + i * 0.19
-        fig.text(x_pos, 0.88, f'{num}. {label}', fontsize=8, fontweight='bold',
+        fig.text(x_pos, 0.89, f'{num}. {label}', fontsize=9, fontweight='bold',
                 color=ATLAS_COLORS['annotation'], ha='center')
     
     # "vs" labels between rows (in the middle of each column)
-    # For other columns, just "vs"
+    # Skip column I (index 0) since it has the IBP annotation there
     for i in range(1, 5):
         x_pos = 0.11 + i * 0.19
-        fig.text(x_pos, 0.47, 'vs', fontsize=8, color=ATLAS_COLORS['gray'],
+        fig.text(x_pos, 0.47, 'vs', fontsize=9, color=ATLAS_COLORS['gray'],
                 ha='center', va='center', style='italic')
     
     # ==========================================================================
@@ -521,40 +622,41 @@ def main():
     x_ibp = 0.11
     
     # Top formula (PATH): E[∇_x O · ∂x_T/∂θ] - the pathwise/reparameterization gradient
-    fig.text(x_ibp, 0.545, '$\\mathbb{E}[\\nabla_x \\mathcal{O} \\cdot \\partial_\\theta x_T]$', 
-             fontsize=7.5, ha='center', va='bottom', color=ATLAS_COLORS['path_single'],
-             fontweight='bold', bbox=dict(boxstyle='round,pad=0.15', facecolor='white', 
+    fig.text(x_ibp - 0.05, 0.54, '$\\mathbb{E}[\\nabla_x \\mathcal{O} \\cdot \\partial_\\theta x_T]$', 
+             fontsize=9, ha='center', va='bottom', color=ATLAS_COLORS['path_single'],
+             fontweight='bold', bbox=dict(boxstyle='round,pad=0.1', facecolor='white', 
                                           edgecolor=ATLAS_COLORS['path_single'], alpha=0.8, lw=0.5))
     
     # Large equivalence symbol with "Malliavin IBP" label
-    fig.text(x_ibp, 0.47, '≡', fontsize=16, ha='center', va='center', 
+    fig.text(x_ibp - 0.05, 0.47, '≡', fontsize=14, ha='center', va='center', 
              color=ibp_color, fontweight='bold')
-    fig.text(x_ibp + 0.055, 0.47, 'Malliavin\n   IBP', fontsize=6, ha='left', va='center', 
+    fig.text(x_ibp + 0.05, 0.47, 'Malliavin\n   IBP', fontsize=6, ha='left', va='center', 
              color=ibp_color, fontweight='bold', linespacing=0.9)
     
     # Bottom formula (ENSEMBLE): E[O · ∇_θ log p(τ)] - the score/REINFORCE gradient
-    fig.text(x_ibp, 0.395, '$\\mathbb{E}[\\mathcal{O} \\cdot \\nabla_\\theta \\log p(\\tau)]$', 
-             fontsize=7.5, ha='center', va='top', color=ATLAS_COLORS['ensemble_base'],
-             fontweight='bold', bbox=dict(boxstyle='round,pad=0.15', facecolor='white', 
+    fig.text(x_ibp - 0.05, 0.40, '$\\mathbb{E}[\\mathcal{O} \\cdot \\nabla_\\theta \\log p(\\tau)]$', 
+             fontsize=9, ha='center', va='top', color=ATLAS_COLORS['ensemble_base'],
+             fontweight='bold', bbox=dict(boxstyle='round,pad=0.1', facecolor='white', 
                                           edgecolor=ATLAS_COLORS['ensemble_base'], alpha=0.8, lw=0.5))
     
     # Variance comparison - the KEY practical difference!
     # PATH has exponential variance (Lyapunov), ENSEMBLE has linear variance (Itô)
-    fig.text(x_ibp + 0.085, 0.535, 'var $\\sim e^{2\\lambda T}$', 
+    # Position these to the right of the formulas, not overlapping
+    fig.text(x_ibp + 0.065, 0.545, 'var $\\sim e^{2\\lambda T}$', 
              fontsize=6.5, ha='left', va='center', color=ATLAS_COLORS['arrow_bwd'], 
              style='italic')
-    fig.text(x_ibp + 0.085, 0.405, 'var $\\sim T$', 
+    fig.text(x_ibp + 0.065, 0.395, 'var $\\sim T$', 
              fontsize=6.5, ha='left', va='center', color=ATLAS_COLORS['equilibrium'], 
              style='italic')
     
     # Main title
-    fig.suptitle('The Gradient Method Atlas', fontsize=13, fontweight='bold',
+    fig.suptitle('The Gradient Method Atlas', fontsize=15, fontweight='bold',
                 y=0.97, color=ATLAS_COLORS['annotation'])
     
     # Footer
     fig.text(0.5, 0.01,
              'All methods → $-\\beta\\,\\mathrm{Cov}_\\pi(\\mathcal{O}, \\nabla_\\theta U)$ at equilibrium',
-             ha='center', fontsize=9, color=ATLAS_COLORS['equilibrium'], fontweight='bold')
+             ha='center', fontsize=10, color=ATLAS_COLORS['equilibrium'], fontweight='bold')
     
     # Save
     output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
