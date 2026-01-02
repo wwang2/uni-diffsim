@@ -6,6 +6,7 @@ from .integrators import (
     OverdampedLangevin, BAOAB, VelocityVerlet, NoseHooverChain, ESH, GLE,
     kinetic_energy, temperature,
 )
+from .simulation import run_simulation, generate_trajectory
 from .gradient_estimators import (
     ReinforceEstimator, GirsanovEstimator, ReweightingLoss,
     ImplicitDiffEstimator,
@@ -23,6 +24,8 @@ __all__ = [
     # Integrators
     "OverdampedLangevin", "BAOAB", "VelocityVerlet", "NoseHooverChain", "ESH", "GLE",
     "kinetic_energy", "temperature",
+    # Simulation
+    "run_simulation", "generate_trajectory",
     # Gradient Estimators
     "ReinforceEstimator", "GirsanovEstimator", "ReweightingLoss",
     "ImplicitDiffEstimator",
