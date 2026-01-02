@@ -3,6 +3,8 @@
 
 > "All chaos is order misunderstood."    — Alexander Pope
 
+![Gradient Estimators](assets/gradient_estimators.png)
+
 This project explores a question I've wondered about for years:
 
 > What does it mean to "differentiate through simulation"?
@@ -49,6 +51,16 @@ Four approaches for computing gradients through stochastic simulations:
 | **REINFORCE** | O(1) | ✓ | ✗ | Score function / TPT, equilibrium only |
 | **Implicit** | O(1) | ✓ | ✗ | Implicit differentiation, equilibrium only |
 | **Girsanov** | O(1) | ✓ | ✓ | Path reweighting, high variance for long T |
+
+### Visualizing the Methods
+
+To understand the conceptual differences between these methods (computational graphs, flow of information), you can generate a schematic diagram:
+
+```bash
+python scripts/generate_gradient_schematics.py
+```
+
+![Gradient Methods Schematic](assets/gradient_methods_schematic.png)
 
 The REINFORCE estimator uses the thermodynamic perturbation theory identity:
 ```
