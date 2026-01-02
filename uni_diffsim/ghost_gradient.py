@@ -256,9 +256,18 @@ class GhostGradientEstimator(nn.Module):
 
         # We'll use vmap to get dO/dx at each point
         def obs_wrapper(x):
-            return observable(x.unsqueeze(0)).squeeze(0) # Handle batch dim in observable if needed
+            out = observable(x.unsqueeze(0))
+            # Handle batch dim in observable if needed
+            if out.ndim > 0:
+                return out.squeeze(0)
+            return out
 
         # Gradient of O w.r.t. x (n_steps, dim)
+        # Check if observable returns scalar
+        dummy_out = obs_wrapper(trajectory[0])
+        if dummy_out.numel() != 1:
+             raise ValueError(f"Observable must return scalar for gradient computation, got shape {dummy_out.shape}")
+
         dO_dx = vmap(torch.func.grad(obs_wrapper))(trajectory)
 
         # Contract with v

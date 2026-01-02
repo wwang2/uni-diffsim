@@ -469,6 +469,25 @@ class Harmonic(Potential):
         return 0.5 * self.k * (x**2).sum(-1)
 
 
+class HenonHeiles(Potential):
+    """Henon-Heiles potential: U(x,y) = 0.5(x^2 + y^2) + lambda * (x^2*y - y^3/3).
+
+    A classic system for Hamiltonian chaos.
+
+    Args:
+        lam: Nonlinearity parameter (lambda).
+    """
+
+    def __init__(self, lam: float = 1.0):
+        super().__init__()
+        self.lam = nn.Parameter(torch.tensor(lam, dtype=torch.float32))
+
+    def energy(self, xy: torch.Tensor) -> torch.Tensor:
+        """xy: (..., 2)"""
+        x, y = xy[..., 0], xy[..., 1]
+        return 0.5 * (x**2 + y**2) + self.lam * (x**2 * y - y**3 / 3.0)
+
+
 if __name__ == "__main__":
     """Quick sanity check for potentials."""
     import numpy as np
@@ -536,4 +555,10 @@ if __name__ == "__main__":
     assert H.shape == (2, 2)
     print(f"  Hessian computation: OK, shape={H.shape}")
     
+    # HenonHeiles
+    hh = HenonHeiles()
+    xy = torch.tensor([1.0, 1.0])
+    u = hh.energy(xy)
+    print(f"  HenonHeiles: U(1,1)={u.item():.3f}")
+
     print("\nAll potentials passed sanity check!")
