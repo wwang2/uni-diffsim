@@ -288,7 +288,8 @@ class LennardJones(Potential):
         # LJ: 4ε[(σ/r)¹² - (σ/r)⁶]
         s2 = self.sigma**2 / r2_pairs
         s6 = s2**3
-        u_pairs = 4 * self.eps * (s6**2 - s6)
+        # u = 4eps * s6 * (s6 - 1)
+        u_pairs = 4 * self.eps * s6 * (s6 - 1)
         return u_pairs.sum(-1)
 
 
@@ -437,7 +438,8 @@ class LennardJonesVerlet(LennardJones):
         
         s2 = self.sigma**2 / r2
         s6 = s2**3
-        u_pairs = 4 * self.eps * (s6**2 - s6)
+        # u = 4eps * s6 * (s6 - 1)
+        u_pairs = 4 * self.eps * s6 * (s6 - 1)
         
         # Optional: Zero out energy beyond cutoff if desired. 
         # u_pairs = torch.where(r2 < r_cut_sq, u_pairs, torch.zeros_like(u_pairs))
@@ -570,6 +572,10 @@ class DimerWCA(Potential):
             self._indices_cache[0] != n or
             self._indices_cache[1] != device):
             idx_i, idx_j = torch.triu_indices(n, n, offset=1, device=device)
+            # Optimization: Exclude pair (0,1) which is always the first pair
+            # This avoids double counting the dimer bond in WCA loop
+            idx_i = idx_i[1:]
+            idx_j = idx_j[1:]
             self._indices_cache = (n, device, idx_i, idx_j)
         else:
             _, _, idx_i, idx_j = self._indices_cache
@@ -587,51 +593,21 @@ class DimerWCA(Potential):
         # Mask for cutoff
         mask = r2 < self.rc2_wca
         
-        # To maintain differentiability where possible and avoid NaNs for r=0 (unlikely with mask but possible in grad),
-        # we can compute for all and mask, or mask first.
-        # Since r2 can be large, s2 can be small. r2=0 -> inf.
-        # Let's use torch.where to avoid computing on far particles if possible, or just mask result.
-        # But for gradients, masking input or output?
-        # Standard: Compute LJ, add eps, relu.
-        
-        # s2 = sigma^2 / r2
-        # For stability, avoid division by zero if r2 is tiny? WCA implies repulsion so r->0 is high energy.
-        # We only care about r2 < rc2.
-        
-        # A safe way:
-        # u_wca_pairs = torch.zeros_like(r2)
-        # relevant_r2 = r2[mask] -> this breaks shape for batching if mask is data-dependent (it is).
-        # So we must keep shape.
-        
         # Soft approach for batching:
         s2 = self.sigma**2 / r2
         s6 = s2**3
-        lj_part = 4 * self.eps * (s6**2 - s6)
+        # LJ = 4eps * (s12 - s6) = 4eps * s6 * (s6 - 1)
+        # Using factorized form saves one square operation
+        lj_part = 4 * self.eps * s6 * (s6 - 1)
         wca_pair = lj_part + self.eps
         
         # Apply cutoff
-        # Use torch.where. 
-        # Note: if r2 is very large, s2 is 0, lj is 0, + eps -> eps. So we MUST mask.
         u_pairs = torch.where(mask, wca_pair, torch.zeros_like(wca_pair))
         
         # Sum over all pairs
         u_total_wca = u_pairs.sum(-1)
         
-        # --- 3. Exclude WCA for Dimer Pair (0,1) ---
-        # We computed WCA for ALL pairs, including (0,1) if it's close enough.
-        # We must subtract it if it was added.
-        
-        # Check if dimer bond is within WCA cutoff
-        mask_bond = r_bond**2 < self.rc2_wca
-        
-        s2_bond = self.sigma**2 / r_bond**2
-        s6_bond = s2_bond**3
-        lj_bond = 4 * self.eps * (s6_bond**2 - s6_bond)
-        wca_bond = lj_bond + self.eps
-        
-        correction = torch.where(mask_bond, wca_bond, torch.zeros_like(wca_bond))
-        
-        u_total_wca = u_total_wca - correction
+        # Correction step for pair (0,1) is no longer needed as we excluded it from indices
         
         return u_bond + u_total_wca
 
