@@ -318,6 +318,7 @@ class LennardJonesVerlet(LennardJones):
         # Buffers for neighbor list
         self.register_buffer("neighbor_list_i", torch.empty(0, dtype=torch.long))
         self.register_buffer("neighbor_list_j", torch.empty(0, dtype=torch.long))
+        self.register_buffer("neighbor_list_batch_idx", torch.empty(0, dtype=torch.long))
         
         # Store last update position for displacement check (optional usage)
         self.register_buffer("last_update_x", torch.zeros(1))
@@ -328,25 +329,36 @@ class LennardJonesVerlet(LennardJones):
         Finds all pairs with distance < cutoff + skin.
         """
         with torch.no_grad():
-            # Ensure we work with flattened batch or just the last 2 dims if possible.
-            # Neighbor lists for batched inputs are tricky (indices differ per batch).
-            # This implementation assumes single configuration or shared neighbors (unlikely).
-            # STRICT LIMITATION: Currently supports only single system (batch_dim=0).
-            if x.ndim > 2:
-                raise NotImplementedError("Batched Verlet lists not yet supported. Use scalar batch.")
-                
-            n = x.shape[0]
             device = x.device
+            is_batched = x.ndim > 2
+
+            # Prepare batch shape
+            if is_batched:
+                # Flatten batch dims to single batch dimension
+                batch_dims = x.shape[:-2]
+                n_batch = int(torch.prod(torch.tensor(batch_dims)))
+                n_particles = x.shape[-2]
+                dim = x.shape[-1]
+                x_flat = x.reshape(n_batch, n_particles, dim)
+            else:
+                # Fake batch dimension for unified handling
+                x_flat = x.unsqueeze(0)
+                n_batch = 1
+                n_particles = x.shape[-2]
+                dim = x.shape[-1]
+
+            n = n_particles
             
             # Compute all pairwise distances (amortized cost)
             if self.box_size is None:
                 # Efficiently use cdist for non-PBC
-                dists = torch.cdist(x, x)
+                # x_flat: (B, N, D) -> dists: (B, N, N)
+                dists = torch.cdist(x_flat, x_flat)
             else:
-                # Manual PBC distance (O(N^2) memory!)
-                # Note: For very large N, this O(N^2) memory might OOM.
-                # Chunking would be needed here for N > 5k-10k.
-                diff = x.unsqueeze(0) - x.unsqueeze(1) # (N, N, D)
+                # Manual PBC distance (O(B * N^2) memory!)
+                # x_flat: (B, N, D)
+                # unsqueeze to (B, N, 1, D) and (B, 1, N, D)
+                diff = x_flat.unsqueeze(2) - x_flat.unsqueeze(1) # (B, N, N, D)
                 diff = self._minimum_image(diff)
                 dists = diff.norm(dim=-1)
                 
@@ -356,11 +368,18 @@ class LennardJonesVerlet(LennardJones):
             
             # Only keep upper triangular to avoid double counting
             triu_mask = torch.triu(torch.ones(n, n, device=device, dtype=torch.bool), diagonal=1)
-            final_mask = mask & triu_mask
+            # Broadcast triu mask over batch
+            final_mask = mask & triu_mask.unsqueeze(0)
             
             # Get indices
-            idx_i, idx_j = final_mask.nonzero(as_tuple=True)
+            # nonzero returns (batch_idx, i, j)
+            indices = final_mask.nonzero() # (N_pairs, 3)
+
+            batch_idx = indices[:, 0]
+            idx_i = indices[:, 1]
+            idx_j = indices[:, 2]
             
+            self.neighbor_list_batch_idx = batch_idx
             self.neighbor_list_i = idx_i
             self.neighbor_list_j = idx_j
             
@@ -392,24 +411,37 @@ class LennardJonesVerlet(LennardJones):
 
     def energy(self, x: torch.Tensor) -> torch.Tensor:
         """Compute energy using stored neighbor list. O(N_neighbors)."""
-        # Automatic update if needed (single system only)
-        if x.ndim == self.event_dim:
-            if self.check_neighbor_list(x):
-                self.update_neighbor_list(x)
-        elif x.ndim > self.event_dim:
-            # Fallback to O(N^2) base implementation for batches
-            return super().energy(x)
+        # Automatic update if needed (single or batched)
+        if self.check_neighbor_list(x):
+            self.update_neighbor_list(x)
 
         if self.neighbor_list_i.numel() == 0:
             # Fallback for empty neighbor list: return 0 connected to x for gradients
-            return (x * 0.0).sum()
+            res_shape = x.shape[:-2] if x.ndim > 2 else ()
+            return torch.zeros(res_shape, device=x.device, dtype=x.dtype) + (x * 0.0).sum()
             
         idx_i = self.neighbor_list_i
         idx_j = self.neighbor_list_j
+        batch_idx = self.neighbor_list_batch_idx
         
-        # Gather positions
-        xi = x[idx_i] # (n_pairs, D)
-        xj = x[idx_j]
+        is_batched = x.ndim > 2
+
+        if is_batched:
+            # Flatten batch dims
+            batch_shape = x.shape[:-2]
+            n_batch = int(torch.prod(torch.tensor(batch_shape)))
+            n_particles = x.shape[-2]
+            dim = x.shape[-1]
+            x_flat = x.reshape(-1, n_particles, dim)
+
+            # Use batch_idx to gather from correct batch
+            # Advanced indexing: x_flat[batch_idx, idx_i]
+            xi = x_flat[batch_idx, idx_i] # (n_pairs, D)
+            xj = x_flat[batch_idx, idx_j]
+        else:
+            # Single system
+            xi = x[idx_i] # (n_pairs, D)
+            xj = x[idx_j]
         
         diff = xi - xj
         diff = self._minimum_image(diff)
@@ -441,10 +473,18 @@ class LennardJonesVerlet(LennardJones):
         # u = 4eps * s6 * (s6 - 1)
         u_pairs = 4 * self.eps * s6 * (s6 - 1)
         
-        # Optional: Zero out energy beyond cutoff if desired. 
-        # u_pairs = torch.where(r2 < r_cut_sq, u_pairs, torch.zeros_like(u_pairs))
-        
-        return u_pairs.sum()
+        if is_batched:
+            # Aggregate per batch
+            # u_pairs: (Total_Pairs,)
+            # batch_idx: (Total_Pairs,)
+            # Output: (n_batch,)
+            u_batch = torch.zeros(n_batch, device=x.device, dtype=x.dtype)
+            u_batch.scatter_add_(0, batch_idx, u_pairs)
+
+            # Reshape back to original batch shape
+            return u_batch.reshape(batch_shape)
+        else:
+            return u_pairs.sum()
 
 
 class Harmonic(Potential):
