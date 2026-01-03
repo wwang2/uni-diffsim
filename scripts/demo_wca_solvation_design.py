@@ -140,7 +140,7 @@ def run_solvation_design_demo():
     n_steps_per_epoch = 1000
     burn_in = 200
     dt = 0.001 # Reduced dt for WCA stability
-    n_epochs = 10
+    n_epochs = 30
 
     # Constants
     r0 = dimer.r0.item()
