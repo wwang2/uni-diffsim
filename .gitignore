@@ -73,3 +73,7 @@ dmypy.json
 .DS_Store
 Thumbs.db
 
+# Generated plots
+*.png
+*.pdf
+*.svg
