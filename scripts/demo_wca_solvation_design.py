@@ -3,11 +3,16 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+import matplotlib.pyplot as plt
 from typing import Tuple
 
 from uni_diffsim.potentials import DimerWCA
 from uni_diffsim.integrators import OverdampedLangevin
 from uni_diffsim.gradient_estimators import reinforce_gradient
+from uni_diffsim.plotting import apply_style, COLORS
+
+# Apply shared plotting style
+apply_style()
 
 def init_lattice(n_solvent: int, box_size: float) -> torch.Tensor:
     """Initialize solvent particles on a simple cubic lattice."""
@@ -56,18 +61,14 @@ def create_system(n_batch: int = 16, device: str = "cpu") -> Tuple[DimerWCA, tor
     dist1 = (solvent_pos - p1).norm(dim=1)
     min_dist = 1.2 # slightly larger than sigma
 
-    mask_clash = (dist0 < min_dist) | (dist1 < min_dist)
-    if mask_clash.any():
-        print(f"Fixing {mask_clash.sum()} overlapping solvent particles...")
-        # Move overlapping particles to corners of the box where it's likely empty
-        # Or just perturb them significantly
-        # With 64 particles in 5.1^3 box, plenty of space.
-        # Let's just move them to z = +L/2 - epsilon
-        solvent_pos[mask_clash, 2] = box_size/2 - 0.6
-        solvent_pos[mask_clash, 0] = (torch.rand(mask_clash.sum(), device=device) - 0.5) * box_size
-        solvent_pos[mask_clash, 1] = (torch.rand(mask_clash.sum(), device=device) - 0.5) * box_size
+    mask_keep = (dist0 >= min_dist) & (dist1 >= min_dist)
+    n_removed = (~mask_keep).sum().item()
 
-    x0_single = torch.cat([p0.unsqueeze(0), p1.unsqueeze(0), solvent_pos], dim=0) # (2+n_solvent, 3)
+    if n_removed > 0:
+        print(f"Removing {n_removed} overlapping solvent particles.")
+        solvent_pos = solvent_pos[mask_keep]
+
+    x0_single = torch.cat([p0.unsqueeze(0), p1.unsqueeze(0), solvent_pos], dim=0) # (2+n_solvent_actual, 3)
     x0 = x0_single.unsqueeze(0).repeat(n_batch, 1, 1)
 
     return dimer, x0
@@ -212,28 +213,28 @@ def run_solvation_design_demo():
     if len(history_prob) > 0:
         print(f"Final P(Extended): {history_prob[-1]:.3f}")
 
-    try:
-        import matplotlib.pyplot as plt
-        plt.figure(figsize=(10, 5))
-        plt.subplot(1, 2, 1)
-        plt.plot(history_eps, 'o-', label='Epsilon')
-        plt.xlabel('Epoch')
-        plt.ylabel('Solvent Epsilon')
-        plt.title('Parameter Optimization')
-        plt.grid(True)
+    # Plotting with consistent style
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
 
-        plt.subplot(1, 2, 2)
-        plt.plot(history_prob, 's-', color='orange', label='P(Extended)')
-        plt.xlabel('Epoch')
-        plt.ylabel('Probability')
-        plt.title('Target Objective')
-        plt.grid(True)
+    # Left: Parameter Optimization
+    ax1.plot(history_eps, 'o-', color=COLORS['blue'], label=r'Solvent $\epsilon$', linewidth=2)
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel(r'Solvent $\epsilon$')
+    ax1.set_title('Parameter Optimization')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
 
-        plt.tight_layout()
-        plt.savefig('wca_optimization.png')
-        print("Plot saved to wca_optimization.png")
-    except ImportError:
-        pass
+    # Right: Target Objective
+    ax2.plot(history_prob, 's-', color=COLORS['orange'], label='P(Extended)', linewidth=2)
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('Probability')
+    ax2.set_title('Target Objective')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+
+    plt.tight_layout()
+    plt.savefig('wca_optimization.png', dpi=150)
+    print("Plot saved to wca_optimization.png")
 
 if __name__ == "__main__":
     run_solvation_design_demo()
