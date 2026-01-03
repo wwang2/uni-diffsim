@@ -6,17 +6,19 @@ Gradient Method Atlas: Visual Schematic
 Generates a compact schematic illustrating the landscape of gradient estimation
 methods as discussed in `uni-diffsim/research-plan.md`.
 
-Key conceptual axes visualized:
+Key conceptual axes visualized (7 dualities):
 1. **Path vs Ensemble**: Single trajectory memory vs statistical forgetting
 2. **Forward vs Backward**: Sensitivity propagation direction
 3. **SDE vs ODE**: Stochastic noise vs deterministic thermostat
 4. **BPTT vs Likelihood Ratio**: Backprop (Jacobian chain) vs path score accumulation
-5. **Fine vs Coarse**: Sample-level (ML) vs observable-level matching
+5. **Data Likelihood vs Observable**: Sample-level (ML) vs observable-level matching
+6. **Equilibrium vs Non-Equilibrium**: Stationary (forgets history) vs transient (history matters)
+7. **Memory vs Compute**: Store all O(T) vs checkpoint O(√T) with 2× recompute
 
 Visual style: Particles bouncing in a double-well potential to convey
 "molecular simulation" rather than generic diffusion plots.
 
-Minimal axes/ticks to focus on concepts. Horizontal layout for compactness.
+Minimal axes/ticks to focus on concepts. Horizontal layout (2 rows × 7 columns).
 """
 
 import matplotlib.pyplot as plt
@@ -63,6 +65,11 @@ ATLAS_COLORS = {
     'jacobian': '#D08770',   # Orange for Jacobian vectors (BPTT)
     'lr_score': '#B48EAD',   # Purple for likelihood ratio scores
     'particle': '#2E3440',   # Dark for particle markers
+    # New axes colors
+    'eq_stationary': '#059669',   # Emerald for equilibrium/stationary
+    'noneq_transient': '#DC2626', # Red for non-equilibrium/transient
+    'memory_store': '#7C3AED',    # Violet for memory (store all)
+    'memory_recompute': '#0891B2', # Cyan for compute (recompute/checkpoint)
 }
 
 
@@ -204,6 +211,23 @@ def plot_path(ax):
     # Draw energy landscape as colored background
     draw_energy_background(ax, barrier_height=0.55, alpha=0.3, t_range=t_range)
     
+    # --- CHAOS VISUALIZATION ---
+    # Show a slightly perturbed trajectory diverging to illustrate "remembers" = "instability"
+    # This visually justifies the exp(2λT) variance note
+    dt_sim = 0.01
+    od = OverdampedLangevin(gamma=1.0, kT=0.15).to(DEVICE)
+    # Same seed/noise, slightly different start
+    x0_pert = torch.tensor([-0.7 + 0.08], device=DEVICE) 
+    # Run shadow simulation
+    torch.manual_seed(100) 
+    x_pert = run_sim(od, x0_pert, len(t)-1, dt_sim)[:, 0]
+    
+    # Plot shadow trajectory (faint, diverging)
+    ax.plot(t, x_pert, color=ATLAS_COLORS['path_single'], lw=1.0, alpha=0.4, ls='--', zorder=4)
+    ax.text(t[int(len(t)*0.7)], x_pert[int(len(t)*0.7)] + 0.25, 'chaos?', 
+            fontsize=7, color=ATLAS_COLORS['path_single'], alpha=0.6, style='italic', ha='center')
+    # ---------------------------
+
     # Plot the trajectory
     ax.plot(t, x, color=ATLAS_COLORS['path_single'], lw=1.8, alpha=0.9, zorder=5)
     
@@ -600,6 +624,11 @@ def plot_likelihood_ratio(ax):
             transform=ax.transAxes, fontsize=7, color=ATLAS_COLORS['lr_score'],
             bbox=dict(boxstyle='round,pad=0.1', facecolor='white', alpha=0.9, edgecolor='none'))
     
+    # --- RL CONNECTION ---
+    ax.text(0.95, 0.05, '$\\equiv$ Policy Gradient', 
+            transform=ax.transAxes, ha='right', fontsize=8, 
+            color=ATLAS_COLORS['lr_score'], fontweight='bold', alpha=0.8)
+    
     ax.set_title('PATH LR', fontsize=11, fontweight='bold', 
                  color=ATLAS_COLORS['lr_score'], pad=4)
     ax.text(0.5, 0.02, 'var $\\sim T$', 
@@ -625,7 +654,7 @@ def plot_likelihood_ratio(ax):
 # Both losses lead to the same covariance gradient structure!
 # =============================================================================
 
-def plot_data_likelihood(ax):
+def plot_data_likelihood(ax, show_title=True):
     """Contrastive Divergence Loss: L = E_data[E] - E_model[E]
     
     The CD loss directly compares energies at data vs model samples.
@@ -681,13 +710,20 @@ def plot_data_likelihood(ax):
     
     ax.set_xlim(t_range[0], t_range[1])
     ax.set_ylim(-1.1, 1.1)
-    ax.set_title('DATA LIKELIHOOD', fontsize=11, fontweight='bold', color=ATLAS_COLORS['fine'], pad=4)
-    ax.text(0.5, 0.02, '$\\mathcal{L} = \\mathbb{E}_{\\mathrm{data}}[\\nabla U] - \\mathbb{E}_{\\mathrm{model}}[\\nabla U]$', 
-            transform=ax.transAxes, ha='center', fontsize=7, color=ATLAS_COLORS['fine'])
+    if show_title:
+        ax.set_title('DATA LIKELIHOOD', fontsize=11, fontweight='bold', color=ATLAS_COLORS['fine'], pad=4)
+        ax.text(0.5, 0.92, '$\\mathcal{L} = \\mathbb{E}_{\\mathrm{data}}[E] - \\mathbb{E}_{\\mathrm{model}}[E]$', 
+                transform=ax.transAxes, ha='center', fontsize=7, color=ATLAS_COLORS['fine'])
+        
+        # --- CD CONNECTION ---
+        ax.text(0.5, 0.05, '(Contrastive Divergence)', 
+                transform=ax.transAxes, ha='center', fontsize=8, 
+                color=ATLAS_COLORS['fine'], style='italic')
+
     clean_axis(ax)
 
 
-def plot_observable(ax):
+def plot_observable(ax, show_title=True):
     """Observable Loss: L = (⟨O⟩ - target)²
     
     Match a statistic (observable) rather than the full distribution.
@@ -738,73 +774,390 @@ def plot_observable(ax):
     ax.text(t_end * 0.85, target_mean + 0.12, '$\\langle x \\rangle^*$', 
             fontsize=8, color=ATLAS_COLORS['data'], fontweight='bold', va='bottom', ha='center')
     
-    ax.set_title('OBSERVABLE', fontsize=11, fontweight='bold', color=ATLAS_COLORS['coarse'], pad=4)
-    ax.text(0.5, 0.02, '$\\mathcal{L} = (\\langle x \\rangle_T - \\langle x \\rangle^*)^2$', 
-            transform=ax.transAxes, ha='center', fontsize=8, color=ATLAS_COLORS['coarse'])
+    if show_title:
+        ax.set_title('OBSERVABLE', fontsize=11, fontweight='bold', color=ATLAS_COLORS['coarse'], pad=4)
+        ax.text(0.5, 0.02, '$\\mathcal{L} = (\\langle x \\rangle_T - \\langle x \\rangle^*)^2$', 
+                transform=ax.transAxes, ha='center', fontsize=8, color=ATLAS_COLORS['coarse'])
     ax.set_xlim(t_range[0], t_range[1])
     ax.set_ylim(-1.1, 1.1)
     clean_axis(ax)
 
 
 # =============================================================================
-# Main Figure Assembly - Horizontal Layout (5 columns x 2 rows)
+# Row 6: EQUILIBRIUM vs NON-EQUILIBRIUM
+# =============================================================================
+# 
+# KEY INSIGHT: Equilibrium systems "forget" their history - the gradient only
+# depends on the stationary distribution π. Non-equilibrium systems (transient,
+# driven, NESS) retain path-dependence - history matters for the gradient.
+#
+# Equilibrium: ∇_θ⟨O⟩ = -β Cov_π(O, ∇_θU)  (time-independent!)
+# Non-equilibrium: ∇_θ⟨O(τ)⟩ depends on the full path measure
+# =============================================================================
+
+def plot_equilibrium(ax):
+    """Equilibrium: Stationary distribution π, time-independent gradient.
+    
+    At equilibrium, the system has "forgotten" its initial conditions.
+    The gradient depends only on the stationary covariance structure.
+    
+    Visual: Ensemble that has relaxed to equilibrium, showing the bimodal
+    stationary distribution. Time arrow fades - equilibrium is timeless.
+    """
+    # Get reference trajectory for time axis
+    t_ref, _ = get_exemplar_trajectory()
+    
+    # Generate long-equilibrated ensemble in BATCH
+    n_paths = 12
+    dt = 0.012
+    # Start from mixed initial conditions
+    x0_values = torch.tensor([(-0.7 if i % 2 == 0 else 0.7) for i in range(n_paths)], device=DEVICE)
+    od = OverdampedLangevin(gamma=1.0, kT=0.15).to(DEVICE)
+    x_batch = run_sim(od, x0_values, len(t_ref)-1, dt)
+    t = np.linspace(0, (len(t_ref)-1)*dt, len(t_ref))
+    t_end = t[-1]
+    
+    # Draw energy background
+    t_range = (t[0], t_end + 0.85)
+    draw_energy_background(ax, barrier_height=0.5, alpha=0.25, t_range=t_range)
+    
+    # Plot trajectories - fade in time to show "forgetting"
+    for i in range(n_paths):
+        x = x_batch[:, i]
+        # Fade alpha along trajectory (early = faded, late = solid)
+        for j in range(0, len(t)-10, 10):
+            alpha = 0.1 + 0.3 * (j / len(t))
+            ax.plot(t[j:j+12], x[j:j+12], color=ATLAS_COLORS['eq_stationary'], 
+                   alpha=alpha, lw=0.7, zorder=2)
+    
+    # Equilibrium distribution at the end - bimodal
+    y_dist = np.linspace(-1.05, 1.05, 100)
+    eq_dist = 0.5 * np.exp(-8 * (y_dist - 0.7)**2) + 0.5 * np.exp(-8 * (y_dist + 0.7)**2)
+    eq_dist = eq_dist / eq_dist.max() * 0.7
+    
+    ax.fill_betweenx(y_dist, t_end, t_end + eq_dist, color=ATLAS_COLORS['eq_stationary'], alpha=0.5, zorder=3)
+    ax.plot(t_end + eq_dist, y_dist, color=ATLAS_COLORS['eq_stationary'], lw=2.0, zorder=4)
+    ax.text(t_end + 0.45, 0, '$\\pi$', fontsize=11, color=ATLAS_COLORS['eq_stationary'], fontweight='bold')
+    
+    # Time arrow that fades - "time doesn't matter at equilibrium"
+    ax.annotate('', xy=(t_end * 0.7, -0.95), xytext=(t[0] + 0.05, -0.95),
+                arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['annotation'], 
+                               lw=1.2, alpha=0.3))
+    ax.text(t_end * 0.35, -0.88, '$t \\to \\infty$', fontsize=7, 
+            color=ATLAS_COLORS['annotation'], alpha=0.5, ha='center')
+    
+    ax.set_title('EQUILIBRIUM', fontsize=11, fontweight='bold', 
+                 color=ATLAS_COLORS['eq_stationary'], pad=4)
+    ax.text(0.5, 0.02, '"forgets history"', transform=ax.transAxes, ha='center', 
+            fontsize=9, style='italic', color=ATLAS_COLORS['annotation'])
+    ax.set_xlim(t_range[0], t_range[1])
+    ax.set_ylim(-1.1, 1.1)
+    clean_axis(ax)
+
+
+def plot_nonequilibrium(ax):
+    """Non-equilibrium: Jarzynski picture - moving harmonic trap.
+    
+    Jarzynski equality: ⟨e^{-βW}⟩ = e^{-βΔF}
+    
+    Classic setup: A harmonic trap U(x,λ) = k(x-λ)²/2 is moved by an external
+    protocol λ(t). The particle lags behind, and work W is done on the system.
+    
+    Visual: Clear parabolic wells at different positions showing the trap
+    moving, with particle trajectories following.
+    """
+    # Colors - softer palette
+    trap_color = '#6B7280'  # Gray for the trap/potential
+    path_color = '#9CA3AF'  # Lighter gray for trajectories
+    protocol_color = '#374151'  # Dark gray for protocol line
+    
+    # =========================================================================
+    # Draw multiple snapshots of the moving harmonic trap (parabolas)
+    # U(x, λ) = k(x - λ)²/2 where λ(t) moves from left to right
+    # =========================================================================
+    
+    # Trap positions at different times (λ values)
+    trap_centers = [-0.55, -0.15, 0.25, 0.65]  # λ moves left to right
+    trap_times = [0.05, 0.35, 0.65, 0.95]  # Corresponding times
+    
+    # Draw each parabola as a proper U-shaped well
+    for i, (lam, t_pos) in enumerate(zip(trap_centers, trap_times)):
+        # Parabola points: y values around the center
+        y_local = np.linspace(-0.35, 0.35, 40)
+        y_abs = y_local + lam  # Absolute y position
+        
+        # Harmonic potential: U = k*y_local²/2
+        U = 2.0 * y_local**2
+        
+        # Draw parabola opening to the RIGHT (U on x-axis, y on y-axis)
+        # This shows the potential well shape at each time snapshot
+        alpha = 0.25 + 0.35 * (i / len(trap_centers))
+        lw = 1.2 + 0.3 * i
+        ax.plot(t_pos + U * 0.08, y_abs, color=trap_color, lw=lw, alpha=alpha, zorder=2)
+        
+        # Small dot at the trap minimum
+        ax.scatter(t_pos, lam, s=20, color=trap_color, alpha=alpha, zorder=3)
+    
+    # =========================================================================
+    # Protocol line λ(t) - the trap center trajectory (dashed)
+    # =========================================================================
+    t = np.linspace(0, 1, 100)
+    lambda_protocol = -0.55 + 1.2 * t  # Linear protocol
+    ax.plot(t, lambda_protocol, color=protocol_color, ls='--', lw=1.2, alpha=0.6, zorder=4)
+    ax.text(0.92, lambda_protocol[-1] + 0.08, '$\\lambda(t)$', fontsize=8, 
+            color=protocol_color, ha='center', va='bottom')
+    
+    # =========================================================================
+    # Particle trajectories following the moving trap
+    # =========================================================================
+    n_paths = 50
+    np.random.seed(42)
+    
+    t_sim = np.linspace(0, 1, 120)
+    lambda_sim = -0.55 + 1.2 * t_sim
+    
+    paths = np.zeros((len(t_sim), n_paths))
+    paths[0, :] = -0.55 + np.random.randn(n_paths) * 0.08
+    
+    dt = t_sim[1] - t_sim[0]
+    gamma = 5.0
+    noise_scale = 0.12
+    
+    for i in range(1, len(t_sim)):
+        lam = lambda_sim[i]
+        force = -gamma * (paths[i-1, :] - lam)
+        paths[i, :] = paths[i-1, :] + force * dt + noise_scale * np.sqrt(dt) * np.random.randn(n_paths)
+    
+    # Plot trajectories in muted colors
+    for j in range(n_paths):
+        alpha = 0.25 + 0.20 * (j / n_paths)
+        ax.plot(t_sim, paths[:, j], color=path_color, alpha=alpha, lw=0.7, zorder=5)
+    
+    # =========================================================================
+    # Work annotation - show W = ∫ dλ
+    # =========================================================================
+    ax.text(0.03, 0.95, '$W = \\int_0^T \\!\\frac{\\partial U}{\\partial \\lambda}\\, d\\lambda$', 
+            transform=ax.transAxes, fontsize=7, color=ATLAS_COLORS['noneq_transient'],
+            fontweight='bold', va='top',
+            bbox=dict(boxstyle='round,pad=0.15', facecolor='white', alpha=0.9, edgecolor='none'))
+    
+    ax.set_title('NON-EQUILIBRIUM', fontsize=11, fontweight='bold', 
+                 color=ATLAS_COLORS['noneq_transient'], pad=4)
+    ax.text(0.5, 0.02, 'Jarzynski: $\\langle e^{-\\beta W} \\rangle = e^{-\\beta \\Delta F}$', 
+            transform=ax.transAxes, ha='center', fontsize=7, 
+            color=ATLAS_COLORS['noneq_transient'], style='italic')
+    ax.set_xlim(-0.02, 1.08)
+    ax.set_ylim(-1.0, 1.0)
+    clean_axis(ax)
+
+
+# =============================================================================
+# Row 7: MEMORY vs COMPUTE (Backprop Trade-offs)
+# =============================================================================
+# 
+# Three approaches to reverse-mode autodiff through dynamics:
+#   - Store all: O(T) memory, fast backward
+#   - Checkpoint: O(√T) memory, 2× compute  
+#   - Adjoint: O(1) memory, solve backward ODE
+# =============================================================================
+
+def plot_memory_store(ax):
+    """Store All (Discretize-then-Optimize): O(T) memory.
+    
+    Store every intermediate state for the backward pass.
+    Fast but memory-hungry for long trajectories.
+    """
+    # Get the exemplar trajectory
+    t, x = get_exemplar_trajectory()
+    t_range = (t[0], t[-1])
+    
+    # Draw energy background
+    draw_energy_background(ax, barrier_height=0.55, alpha=0.3, t_range=t_range)
+    
+    # Plot the trajectory
+    ax.plot(t, x, color=ATLAS_COLORS['path_single'], lw=1.2, alpha=0.5, zorder=5)
+    
+    # Mark MANY stored states (dense storage)
+    n = len(t)
+    n_stored = 35  # Many points = O(T) memory
+    stored_indices = np.linspace(0, n-1, n_stored, dtype=int)
+    
+    # Draw stored states as small squares on trajectory
+    for idx in stored_indices:
+        ax.scatter(t[idx], x[idx], s=22, color=ATLAS_COLORS['memory_store'], 
+                  marker='s', edgecolor='white', linewidth=0.3, zorder=10, alpha=0.75)
+    
+    # Memory bar visualization on the side (tall stack)
+    mem_x = t[-1] + 0.04
+    mem_height = 0.055
+    for i in range(n_stored):
+        y_base = -0.95 + i * mem_height
+        rect = patches.Rectangle((mem_x, y_base), 0.05, mem_height * 0.85,
+                                  facecolor=ATLAS_COLORS['memory_store'], 
+                                  edgecolor='white', linewidth=0.2,
+                                  alpha=0.55, zorder=8)
+        ax.add_patch(rect)
+    
+    # Label
+    ax.text(mem_x + 0.07, 0, '$O(T)$', fontsize=8, 
+            color=ATLAS_COLORS['memory_store'], fontweight='bold', 
+            ha='left', va='center')
+    
+    ax.set_title('STORE ALL', fontsize=11, fontweight='bold', 
+                 color=ATLAS_COLORS['memory_store'], pad=4)
+    ax.set_xlim(t[0], t[-1] + 0.22)
+    ax.set_ylim(-1.1, 1.1)
+    clean_axis(ax)
+
+
+def plot_memory_recompute(ax):
+    """Adjoint Method (Optimize-then-Discretize): O(1) memory.
+    
+    Solve the adjoint ODE backward in time. Only need current state,
+    not the full trajectory. Memory-efficient for long simulations.
+    """
+    # Get the exemplar trajectory
+    t, x = get_exemplar_trajectory()
+    t_range = (t[0], t[-1])
+    
+    # Draw energy background
+    draw_energy_background(ax, barrier_height=0.55, alpha=0.3, t_range=t_range)
+    
+    # Plot the forward trajectory (faded)
+    ax.plot(t, x, color=ATLAS_COLORS['path_single'], lw=1.2, alpha=0.5, zorder=5)
+    
+    # Show adjoint backward flow with arrows
+    n = len(t)
+    # Only a few points needed - O(1) at any time
+    adjoint_pts = [int(n*0.85), int(n*0.60), int(n*0.35), int(n*0.10)]
+    
+    # Draw backward arrows showing adjoint propagation
+    for i in range(len(adjoint_pts) - 1):
+        idx_from = adjoint_pts[i]
+        idx_to = adjoint_pts[i + 1]
+        ax.annotate('', xy=(t[idx_to], x[idx_to]), xytext=(t[idx_from], x[idx_from]),
+                    arrowprops=dict(arrowstyle='->', color=ATLAS_COLORS['memory_recompute'], 
+                                   lw=1.5, alpha=0.7,
+                                   connectionstyle='arc3,rad=-0.15'))
+    
+    # Mark only the CURRENT state (O(1) memory)
+    current_idx = adjoint_pts[1]  # Show one "current" state
+    ax.scatter(t[current_idx], x[current_idx], s=70, color=ATLAS_COLORS['memory_recompute'], 
+              marker='o', edgecolor='white', linewidth=1.5, zorder=15)
+    
+    # Memory bar visualization (just ONE block!)
+    mem_x = t[-1] + 0.04
+    rect = patches.Rectangle((mem_x, -0.15), 0.05, 0.3,
+                              facecolor=ATLAS_COLORS['memory_recompute'], 
+                              edgecolor='white', linewidth=0.8,
+                              alpha=0.8, zorder=8)
+    ax.add_patch(rect)
+    
+    # Label
+    ax.text(mem_x + 0.07, 0, '$O(1)$', fontsize=8, 
+            color=ATLAS_COLORS['memory_recompute'], fontweight='bold', 
+            ha='left', va='center')
+    
+    ax.set_title('ADJOINT', fontsize=11, fontweight='bold', 
+                 color=ATLAS_COLORS['memory_recompute'], pad=4)
+    ax.set_xlim(t[0], t[-1] + 0.22)
+    ax.set_ylim(-1.1, 1.1)
+    clean_axis(ax)
+
+
+# =============================================================================
+# Main Figure Assembly - Horizontal Layout (2 rows x 7 columns)
 # =============================================================================
 
 def main():
-    fig = plt.figure(figsize=(16, 5))
+    fig = plt.figure(figsize=(20, 7.5))
     fig.patch.set_facecolor('#FAFBFC')
     
-    # Create 2x5 grid (2 rows, 5 columns of comparisons)
-    gs = fig.add_gridspec(2, 5, hspace=0.25, wspace=0.12,
-                          left=0.03, right=0.98, top=0.82, bottom=0.08)
+    # Create 2x7 grid (2 rows, 7 columns of comparisons)
+    # Now includes: Path/Ensemble, Fwd/Bwd, SDE/ODE, BPTT/LR, DataLik/Obs, Eq/NonEq, Memory/Compute
+    gs = fig.add_gridspec(2, 7, hspace=0.20, wspace=0.10,
+                          left=0.025, right=0.985, top=0.86, bottom=0.06)
     
-    # Column labels
+    # Column labels - now 7 columns
     col_info = [
         ('I', 'Path vs Ensemble'),
         ('II', 'Forward vs Backward'),
         ('III', 'SDE vs ODE'),
         ('IV', 'BPTT vs Likelihood Ratio'),
-        ('V', 'Data Likelihood vs Observable'),  # Both use same gradient, different O
+        ('V', 'Data Likelihood vs Observable'),
+        ('VI', 'Equilibrium vs Non-Eq'),
+        ('VII', 'Store All vs Adjoint'),
     ]
     
-    # Plot panels - top row (first of each pair), bottom row (second of each pair)
+    # =========================================================================
+    # Column I: Path vs Ensemble
+    # =========================================================================
     ax_path = fig.add_subplot(gs[0, 0])
     ax_ensemble = fig.add_subplot(gs[1, 0])
     plot_path(ax_path)
     plot_ensemble(ax_ensemble)
     
+    # =========================================================================
+    # Column II: Forward vs Backward
+    # =========================================================================
     ax_fwd = fig.add_subplot(gs[0, 1])
     ax_bwd = fig.add_subplot(gs[1, 1])
     plot_forward(ax_fwd)
     plot_backward(ax_bwd)
     
+    # =========================================================================
+    # Column III: SDE vs ODE
+    # =========================================================================
     ax_sde = fig.add_subplot(gs[0, 2])
     ax_ode = fig.add_subplot(gs[1, 2])
     plot_sde(ax_sde)
     plot_ode(ax_ode)
     
+    # =========================================================================
     # Column IV: BPTT vs Likelihood Ratio
+    # =========================================================================
     ax_bptt = fig.add_subplot(gs[0, 3])
     ax_lr = fig.add_subplot(gs[1, 3])
     plot_bptt(ax_bptt)
     plot_likelihood_ratio(ax_lr)
     
+    # =========================================================================
     # Column V: Data Likelihood vs Observable
+    # =========================================================================
     ax_data_likelihood = fig.add_subplot(gs[0, 4])
     ax_observable = fig.add_subplot(gs[1, 4])
     plot_data_likelihood(ax_data_likelihood)
     plot_observable(ax_observable)
     
+    # =========================================================================
+    # Column VI: Equilibrium vs Non-Equilibrium (NEW)
+    # =========================================================================
+    ax_eq = fig.add_subplot(gs[0, 5])
+    ax_noneq = fig.add_subplot(gs[1, 5])
+    plot_equilibrium(ax_eq)
+    plot_nonequilibrium(ax_noneq)
+    
+    # =========================================================================
+    # Column VII: Memory vs Compute (NEW)
+    # =========================================================================
+    ax_store = fig.add_subplot(gs[0, 6])
+    ax_recompute = fig.add_subplot(gs[1, 6])
+    plot_memory_store(ax_store)
+    plot_memory_recompute(ax_recompute)
+    
+    # =========================================================================
     # Column labels on top
+    # =========================================================================
+    col_width = 0.137  # Adjusted for 7 columns
     for i, (num, label) in enumerate(col_info):
-        x_pos = 0.11 + i * 0.19
-        fig.text(x_pos, 0.89, f'{num}. {label}', fontsize=9, fontweight='bold',
+        x_pos = 0.095 + i * col_width
+        fig.text(x_pos, 0.89, f'{num}. {label}', fontsize=8, fontweight='bold',
                 color=ATLAS_COLORS['annotation'], ha='center')
     
     # "vs" labels between rows (in the middle of each column)
-    # Skip column I (index 0) since it has the IBP annotation there
-    for i in range(1, 5):
-        x_pos = 0.11 + i * 0.19
+    # Skip columns with special annotations (I, V, VI, VII)
+    for i in [1, 2, 3]:  # Only columns II, III, IV get simple "vs"
+        x_pos = 0.095 + i * col_width
         fig.text(x_pos, 0.47, 'vs', fontsize=9, color=ATLAS_COLORS['gray'],
                 ha='center', va='center', style='italic')
     
@@ -813,73 +1166,106 @@ def main():
     # This is the key mathematical insight: Malliavin IBP shows they're equivalent
     # ==========================================================================
     ibp_color = '#8B5CF6'  # Purple for the IBP connection
-    
-    # Position for the IBP annotation (between the two panels of column I)
-    x_ibp = 0.11
+    x_ibp = 0.095  # Column I position
     
     # Top formula (PATH): E[∇_x O · ∂x_T/∂θ] - the pathwise/reparameterization gradient
-    fig.text(x_ibp - 0.05, 0.54, '$\\mathbb{E}[\\nabla_x \\mathcal{O} \\cdot \\partial_\\theta x_T]$', 
-             fontsize=9, ha='center', va='bottom', color=ATLAS_COLORS['path_single'],
+    fig.text(x_ibp - 0.04, 0.54, '$\\mathbb{E}[\\nabla_x \\mathcal{O} \\cdot \\partial_\\theta x_T]$', 
+             fontsize=8, ha='center', va='bottom', color=ATLAS_COLORS['path_single'],
              fontweight='bold', bbox=dict(boxstyle='round,pad=0.1', facecolor='white', 
                                           edgecolor=ATLAS_COLORS['path_single'], alpha=0.8, lw=0.5))
     
     # Large equivalence symbol with "Malliavin IBP" label
-    fig.text(x_ibp - 0.05, 0.47, '≡', fontsize=14, ha='center', va='center', 
+    fig.text(x_ibp - 0.04, 0.47, '≡', fontsize=14, ha='center', va='center', 
              color=ibp_color, fontweight='bold')
-    fig.text(x_ibp + 0.05, 0.47, 'Malliavin\n   IBP', fontsize=8, ha='left', va='center', 
+    fig.text(x_ibp + 0.035, 0.47, 'Malliavin\n   IBP', fontsize=7, ha='left', va='center', 
              color=ibp_color, fontweight='bold', linespacing=0.9)
     
     # Bottom formula (ENSEMBLE): E[O · ∇_θ log p(τ)] - the score/REINFORCE gradient
-    fig.text(x_ibp - 0.05, 0.40, '$\\mathbb{E}[\\mathcal{O} \\cdot \\nabla_\\theta \\log p(\\tau)]$', 
-             fontsize=9, ha='center', va='top', color=ATLAS_COLORS['ensemble_base'],
+    fig.text(x_ibp - 0.04, 0.40, '$\\mathbb{E}[\\mathcal{O} \\cdot \\nabla_\\theta \\log p(\\tau)]$', 
+             fontsize=8, ha='center', va='top', color=ATLAS_COLORS['ensemble_base'],
              fontweight='bold', bbox=dict(boxstyle='round,pad=0.1', facecolor='white', 
                                           edgecolor=ATLAS_COLORS['ensemble_base'], alpha=0.8, lw=0.5))
     
     # Variance comparison - the KEY practical difference!
-    # PATH has exponential variance (Lyapunov), ENSEMBLE has linear variance (Itô)
-    # Position these to the right of the formulas, not overlapping
-    fig.text(x_ibp + 0.065, 0.545, 'var $\\sim e^{2\\lambda T}$', 
-             fontsize=8.5, ha='left', va='center', color=ATLAS_COLORS['arrow_bwd'], 
+    fig.text(x_ibp + 0.055, 0.545, 'var $\\sim e^{2\\lambda T}$', 
+             fontsize=7, ha='left', va='center', color=ATLAS_COLORS['arrow_bwd'], 
              style='italic')
-    fig.text(x_ibp + 0.065, 0.395, 'var $\\sim T$', 
-             fontsize=8.5, ha='left', va='center', color=ATLAS_COLORS['equilibrium'], 
+    fig.text(x_ibp + 0.055, 0.395, 'var $\\sim T$', 
+             fontsize=7, ha='left', va='center', color=ATLAS_COLORS['equilibrium'], 
              style='italic')
     
     # ==========================================================================
     # Column V: Add "Loss Function" annotation between DATA LIKELIHOOD and OBSERVABLE
-    # KEY INSIGHT: Both are different LOSS choices, same underlying gradient structure!
-    # CD Loss: e_data - e_model  |  Observable Loss: (⟨O⟩ - target)²
     # ==========================================================================
-    loss_color = '#059669'  # Emerald green for the loss connection
-    x_loss = 0.11 + 4 * 0.19  # Column V position
+    x_loss = 0.095 + 4 * col_width  # Column V position
     
     # Top: CD Loss formula
-    fig.text(x_loss - 0.06, 0.54, '$\\mathcal{L}_\\mathrm{CD} = E_\\mathrm{data} - E_\\mathrm{model}$', 
-             fontsize=7.5, ha='center', va='bottom', color=ATLAS_COLORS['fine'],
+    fig.text(x_loss - 0.04, 0.54, '$\\mathcal{L}_{\\mathrm{CD}} = E_{\\mathrm{data}} - E_{\\mathrm{model}}$', 
+             fontsize=6.5, ha='center', va='bottom', color=ATLAS_COLORS['fine'],
              fontweight='bold', bbox=dict(boxstyle='round,pad=0.1', facecolor='white', 
                                           edgecolor=ATLAS_COLORS['fine'], alpha=0.8, lw=0.5))
     
-    # "vs" with "choice of L" label - emphasizing it's about LOSS choice
-    # fig.text(x_loss - 0.06, 0.47, 'vs', fontsize=9, ha='center', va='center', 
-    #          color=loss_color, fontweight='bold', style='italic')
-    # fig.text(x_loss + 0.04, 0.47, 'choice\nof $\\mathcal{L}$', fontsize=7.5, ha='left', va='center', 
-    #          color=loss_color, fontweight='bold', linespacing=0.9)
+    # "vs" label
+    fig.text(x_loss, 0.47, 'vs', fontsize=9, color=ATLAS_COLORS['gray'],
+            ha='center', va='center', style='italic')
     
     # Bottom: Observable Loss formula
-    fig.text(x_loss - 0.06, 0.40, '$\\mathcal{L}_\\mathrm{obs} = (\\langle\\mathcal{O}\\rangle - \\mathcal{O}^*)^2$', 
-             fontsize=7.5, ha='center', va='top', color=ATLAS_COLORS['coarse'],
+    fig.text(x_loss - 0.04, 0.40, '$\\mathcal{L}_{\\mathrm{obs}} = (\\langle\\mathcal{O}\\rangle - \\mathcal{O}^*)^2$', 
+             fontsize=6.5, ha='center', va='top', color=ATLAS_COLORS['coarse'],
              fontweight='bold', bbox=dict(boxstyle='round,pad=0.1', facecolor='white', 
                                           edgecolor=ATLAS_COLORS['coarse'], alpha=0.8, lw=0.5))
     
+    # ==========================================================================
+    # Column VI: Equilibrium vs Non-Equilibrium annotation
+    # KEY: At equilibrium, gradient simplifies to covariance formula
+    # ==========================================================================
+    x_eq = 0.095 + 5 * col_width  # Column VI position
+    
+    # Top: Equilibrium gradient (stationary)
+    fig.text(x_eq - 0.02, 0.54, '$\\nabla_\\theta\\langle\\mathcal{O}\\rangle_\\pi$', 
+             fontsize=8, ha='center', va='bottom', color=ATLAS_COLORS['eq_stationary'],
+             fontweight='bold', bbox=dict(boxstyle='round,pad=0.1', facecolor='white', 
+                                          edgecolor=ATLAS_COLORS['eq_stationary'], alpha=0.8, lw=0.5))
+    
+    # "vs" with insight
+    fig.text(x_eq, 0.47, 'vs', fontsize=9, color=ATLAS_COLORS['gray'],
+            ha='center', va='center', style='italic')
+    
+    # Bottom: Non-equilibrium gradient (path-dependent)
+    fig.text(x_eq - 0.02, 0.40, '$\\nabla_\\theta\\langle\\mathcal{O}(\\tau)\\rangle$', 
+             fontsize=8, ha='center', va='top', color=ATLAS_COLORS['noneq_transient'],
+             fontweight='bold', bbox=dict(boxstyle='round,pad=0.1', facecolor='white', 
+                                          edgecolor=ATLAS_COLORS['noneq_transient'], alpha=0.8, lw=0.5))
+    
+    # ==========================================================================
+    # Column VII: Store All vs Adjoint annotation
+    # KEY: Discretize-then-optimize vs optimize-then-discretize
+    # ==========================================================================
+    x_mem = 0.095 + 6 * col_width  # Column VII position
+    
+    # Top: Store all (discretize-then-optimize)
+    fig.text(x_mem - 0.02, 0.54, '$O(T)$ mem', 
+             fontsize=8, ha='center', va='bottom', color=ATLAS_COLORS['memory_store'],
+             fontweight='bold', bbox=dict(boxstyle='round,pad=0.1', facecolor='white', 
+                                          edgecolor=ATLAS_COLORS['memory_store'], alpha=0.8, lw=0.5))
+    
+    # "vs" 
+    fig.text(x_mem, 0.47, 'vs', fontsize=9, color=ATLAS_COLORS['gray'],
+            ha='center', va='center', style='italic')
+    
+    # Bottom: Adjoint (optimize-then-discretize)
+    fig.text(x_mem - 0.02, 0.40, '$O(1)$ mem', 
+             fontsize=8, ha='center', va='top', color=ATLAS_COLORS['memory_recompute'],
+             fontweight='bold', bbox=dict(boxstyle='round,pad=0.1', facecolor='white', 
+                                          edgecolor=ATLAS_COLORS['memory_recompute'], alpha=0.8, lw=0.5))
+    
+    # =========================================================================
     # Main title
+    # =========================================================================
     fig.suptitle('The Gradient Method Atlas', fontsize=15, fontweight='bold',
                 y=0.97, color=ATLAS_COLORS['annotation'])
     
-    # Footer
-    fig.text(0.5, 0.01,
-             'All methods → $-\\beta\\,\\mathrm{Cov}_\\pi(\\mathcal{O}, \\nabla_\\theta U)$ at equilibrium',
-             ha='center', fontsize=10, color=ATLAS_COLORS['equilibrium'], fontweight='bold')
-    
+
     # Save
     output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
     os.makedirs(output_dir, exist_ok=True)
